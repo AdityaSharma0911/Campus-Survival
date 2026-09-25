@@ -1,0 +1,2522 @@
+diff --git a/backend/.env.example b/backend/.env.example
+new file mode 100644
+index 0000000..710c7c0
+--- /dev/null
++++ b/backend/.env.example
+@@ -0,0 +1,12 @@
++# Copy this file to .env and fill it in. .env is git-ignored: never commit your key.
++GEMINI_API_KEY=paste-your-google-ai-studio-key-here
++GEMINI_MODEL=gemini-flash-latest
++
++PORT=8787
++
++# Freeze the clock for demos (judging is in the evening, when most dining is closed).
++# DEMO_MODE=1 -> Wednesday 12:15 PM.  Or pick any time: DEMO_NOW=3 12:15pm  (0=Sun ... 6=Sat)
++DEMO_MODE=1
++
++# Where to start when the user doesn't say (building id)
++DEFAULT_ORIGIN=SL
+diff --git a/backend/.gitignore b/backend/.gitignore
+new file mode 100644
+index 0000000..53df79a
+--- /dev/null
++++ b/backend/.gitignore
+@@ -0,0 +1,3 @@
++.env
++node_modules/
++*.log
+diff --git a/backend/README.md b/backend/README.md
+new file mode 100644
+index 0000000..b22cbac
+--- /dev/null
++++ b/backend/README.md
+@@ -0,0 +1,110 @@
++# Campus Survival — backend
++
++Node 18.17+ (22 LTS recommended). **No npm install needed**: zero dependencies.
++
++```sh
++cd backend
++cp .env.example .env        # then paste your Google AI Studio key into .env
++npm start                   # http://localhost:8787/api/health
++npm test                    # 43 tests, no key or internet needed
++npm run check               # sample questions; add -- "your sentence" to ask anything
++```
++
++`.env` is git-ignored. The key never leaves the server and never goes in the URL.
++
++## How it works
++
++Same three stages as the project README:
++
++1. **Intent** (`src/intent.js`): Gemini turns the sentence into structured JSON with a strict schema. Bad building ids are thrown out. If Gemini is down, slow, rate-limited, or the key is missing, a rule-based parser handles the same sentences, so **the demo still works without AI**.
++2. **Math** (`src/planner.js`): walking times, lunch-rush lines, opening hours, buffers. Pure JavaScript, Indianapolis time zone.
++3. **Narration** (`src/narrate.js`): Gemini writes the recommendation over the computed numbers and is told never to change them. Template fallback if Gemini fails.
++
++`src/contract.js` checks every response against the frontend's rules before it's sent. Those rules are: total = sum of steps, buffer = available − total, and risk is screwed below 0, tight at 0–3, and safe at 4+.
++
++| File | What it does |
++|---|---|
++| `src/campus.js` | Buildings, dining, vending, study spots |
++| `src/planner.js` | All math, directory, campus status, data validator |
++| `src/intent.js` / `src/narrate.js` / `src/gemini.js` | The AI layer |
++| `src/survive.js` | Sentence in, `SurvivalRecommendation` out |
++| `src/app.js` / `server.js` | HTTP routes / startup |
++| `client/survivalApi.ts` | Drop-in client for the frontend |
++
++## API
++
++### `POST /api/survive`
++
++```json
++{ "query": "I have 30 min between CS 180 in SL 112 and my next class in ET and I'm hungry",
++  "location": { "lat": 39.7762, "lng": -86.1728 },
++  "demoNow": { "day": 3, "hour": "12:15pm" } }
++```
++
++`location` and `demoNow` are optional. GPS is only used when no building is named and the user is on campus.
++
++The response is the frontend's `SurvivalRecommendation` (`location`, `totalMinutes`, `bufferMinutes`, `risk`, `reason`, `steps`) plus:
++
++| Field | Use it for |
++|---|---|
++| `mode` | `food` / `coffee` / `study` / `travel` / `panic` |
++| `origin.short`, `destination.short` | Route card "YOU ARE HERE" / "NEXT CLASS" |
++| `stop` | Pit stop (`name`, `closesAt`, `kind`). `null` = direct route |
++| `narration` | Gemini's recommendation, shown as a paragraph |
++| `alternatives[]` | "Other options" cards: `title`, `detail`, `badge`, and a full plan to `setResult()` on click |
++| `panic` | I'm Screwed panel: `yourMove {title, detail}` and `options[]` (`label`, `detail`, `minutes`, `makesIt`, `recommended`, `steps`) |
++| `campusStatus[]` | `{label, value, busy}` for the status panel |
++| `rejected[]` | Places skipped and why ("closed at 7:00 PM", "needs 32 min, you have 30") |
++| `mapsUrl` | Google Maps walking directions |
++| `assumptions[]` | e.g. "Assumed you're starting in SL" |
++| `steps[].kind` | Icon hint: `food`, `coffee`, `vending`, `study`, `dining` |
++| `ai` | Whether Gemini or the fallback handled intent and narration |
++
++Errors: **422** `{error, needs}` when something essential is missing (the message says exactly what to type). **400** means bad JSON, and **500** means an unexpected failure.
++
++### `GET /api/places`, `GET /api/status`, `GET /api/health`
++
++- `/api/places` is the directory for the Campus / Places views: `id`, `name`, `type` (academic | food | coffee | study), `status` ("Open until 7:00 PM"), and `hoursToday`.
++- `/api/status` returns the campus status panel.
++- `/api/health` reports whether the key is set, whether demo time is on, and whether the data is valid.
++
++## For the UI teammate
++
++Nothing in `frontend/` was changed. To wire it up:
++
++1. Copy `backend/client/survivalApi.ts` to `frontend/src/data/survivalApi.ts`. It already passes `tsc -b` and `vite build` against the current frontend.
++2. In `frontend/vite.config.ts`, add the proxy:
++   ```ts
++   export default defineConfig({ plugins: [tailwindcss()], server: { proxy: { '/api': 'http://localhost:8787' } } });
++   ```
++3. In `App.tsx`, import `getSurvivalRecommendation` from `./data/survivalApi` instead of `./data/mockCampus`. Show `err.message` in the error state; it's written for users.
++
++| Component | Hardcoded today | Use instead |
++|---|---|---|
++| `SurvivalResult` | "Open in demo" | `stop?.closesAt`, `narration` |
++| `RouteCard` | University Hall → Innovation Hall | `origin.short`, `stop?.name`, `destination.short`. Direct route when `stop` is null. Link `mapsUrl` |
++| `Timeline` | icon by `type` | same, plus `step.kind` for coffee/study/vending icons |
++| `AIReasoning` | mock bullets | `reason[]` (computed facts); show `narration` separately |
++| Other options | 3 fixed cards | `alternatives[]` → `title`, `detail`, `badge`; click → `setResult(alt)` |
++| `ScrewedMode` | fixed 8-min options | `panic.options[]`, `panic.yourMove`. "Take direct route" → `setResult` from that option's `steps`, no second request |
++| `CampusStatus` | fixed values | `campusStatus[]` or `GET /api/status` |
++| Places / Campus | `locations` in mockCampus | `GET /api/places` |
++| "MOCK DATA" tags | | remove; show `assumptions[]` as a small note |
++
++**Quick actions that work without GPS.** A trip with no destination returns a 422 asking which building.
++
++| Button | Query |
++|---|---|
++| Try Demo | `I have 30 min between CS 180 in SL 112 and my next class in ET, and I'm hungry.` |
++| Find Food | `I have 25 minutes in SL and I'm hungry.` |
++| Get to Class | `I have 10 minutes to get from North Hall to SL.` |
++| Find Coffee | `I have 30 minutes in the Campus Center and want coffee.` |
++| Find a Study Spot | `I have 45 minutes before my next class in ET and want to study.` |
++
++Optional: call `getCurrentLocation()` and pass `{ location }` so "I'm hungry, 25 minutes" starts from wherever the student is standing.
++
++## Data status (fix before judging)
++
++- **5 building coordinates are estimates** (`verified: false`): SL, ET, LD, UL, IO. In Google Maps, right-click the building and click the coordinates to copy them. Paste them into `src/campus.js`, set `verified: true`, and run `npm test`. The project README says coordinates were verified by hand, so this matters.
++- **Dining hours are unverified** except Tea's Me. Check dineoncampus.com/iuindy. Library and Campus Center building hours are verified.
++- Set `DEMO_MODE=1` in `.env` for judging. Most dining is closed in the evening; demo mode freezes the clock at Wednesday 12:15 PM.
+diff --git a/backend/client/survivalApi.ts b/backend/client/survivalApi.ts
+new file mode 100644
+index 0000000..848c150
+--- /dev/null
++++ b/backend/client/survivalApi.ts
+@@ -0,0 +1,127 @@
++/// <reference types="vite/client" />
++// ============================================================
++// survivalApi.ts — copy to frontend/src/data/survivalApi.ts
++//
++// Drop-in replacement for the mock:
++//   import { getSurvivalRecommendation } from './data/survivalApi';
++// Same signature as mockCampus.ts, returns a superset of SurvivalRecommendation.
++// Validates every response at the boundary (per docs/BACKEND_INTEGRATION.md)
++// and throws a readable Error the existing error state can show.
++// ============================================================
++import type { CampusLocation, RiskLevel, RouteStep, SurvivalRecommendation } from '../types/campus';
++
++const API_BASE: string = (import.meta.env.VITE_API_BASE as string | undefined) ?? ''; // '' = same origin via Vite proxy
++
++export type Mode = 'food' | 'coffee' | 'study' | 'travel' | 'panic';
++
++export interface PlaceRef { id: string; name: string; short: string; lat: number; lng: number }
++
++export interface StopInfo {
++  id: string; name: string; fullName: string;
++  kind: 'dining' | 'vending' | 'study'; building: string | null; tags: string[];
++  closesAt?: string | null; lunchRush?: boolean; toGo?: boolean;
++}
++
++/** Steps carry an optional kind so the Timeline can pick an icon: food | coffee | vending | study | dining */
++export type LiveStep = RouteStep & { kind?: string };
++
++export interface Alternative extends SurvivalRecommendation {
++  steps: LiveStep[];
++  title: string;                       // card heading, e.g. "Pizza Hut" or "Speed-walk to class"
++  badge: 'GOOD OPTION' | 'QUICK SNACK' | 'TIGHT' | 'TOO RISKY';
++  detail: string;                      // "9 min walk · 12 min stop · 7 min to class"
++  mode: Mode; availableMinutes: number; stop: StopInfo | null;
++}
++
++export interface PanicOption {
++  label: string; detail: string; minutes: number;
++  delta: number;                       // minutes to spare (negative = late)
++  makesIt: boolean; recommended: boolean; note: string;
++  kind: 'direct' | 'hustle' | 'vending' | 'grab' | 'meal';
++  location: string; steps: LiveStep[];
++}
++
++export interface LiveRecommendation extends SurvivalRecommendation {
++  steps: LiveStep[];
++  mode: Mode;
++  availableMinutes: number;
++  origin: PlaceRef;                    // route card "YOU ARE HERE"
++  destination: PlaceRef;               // route card "NEXT CLASS"
++  stop: StopInfo | null;               // route card pit stop (null = direct route)
++  narration: string;                   // Gemini's recommendation. Show it as text, not as reasons.
++  alternatives: Alternative[];         // "Other options" cards; click = setResult(alt)
++  rejected: { id: string; location: string; code: string; reason: string }[];
++  panic: { availableMinutes: number; yourMove: { title: string; detail: string }; options: PanicOption[] } | null;
++  campusStatus: { label: string; value: string; busy: boolean }[];
++  mapsUrl: string;                     // Google Maps walking directions
++  assumptions: string[];               // e.g. "Assumed you're starting in SL"
++  computedAt: string;                  // "Wed 12:15 PM"
++  ai: { intent: 'gemini' | 'rules'; narration: 'gemini' | 'template'; errors: string[] };
++}
++
++export interface LivePlace extends CampusLocation {
++  fullName: string; kind: string; building: string | null; residence: boolean;
++  openNow: boolean | null; status: string | null; hoursToday: string | null; tags: string[];
++}
++
++// ---------- validation ----------
++const RISKS: RiskLevel[] = ['safe', 'tight', 'screwed'];
++const STEP_TYPES = ['walk', 'food', 'class'];
++const isNum = (v: unknown): v is number => typeof v === 'number' && Number.isFinite(v);
++const isStr = (v: unknown): v is string => typeof v === 'string' && v.trim().length > 0;
++
++function validateRecommendation(r: any, where = 'response'): void {
++  const fail = (msg: string) => { throw new Error(`The planner sent an unexpected ${where} (${msg}).`); };
++  if (!r || typeof r !== 'object') fail('not an object');
++  if (!isStr(r.location)) fail('location');
++  if (!isNum(r.totalMinutes) || !isNum(r.bufferMinutes)) fail('durations');
++  if (!RISKS.includes(r.risk)) fail('risk');
++  if (!Array.isArray(r.reason) || !r.reason.every((s: unknown) => typeof s === 'string')) fail('reason');
++  if (!Array.isArray(r.steps) || r.steps.length === 0) fail('steps');
++  for (const s of r.steps) if (!STEP_TYPES.includes(s?.type) || !isStr(s?.label) || !isNum(s?.minutes)) fail('step');
++}
++
++async function request<T>(path: string, init?: RequestInit): Promise<T> {
++  let res: Response;
++  try {
++    res = await fetch(`${API_BASE}${path}`, { ...init, headers: { 'Content-Type': 'application/json', ...(init?.headers ?? {}) } });
++  } catch {
++    throw new Error("Can't reach the planner. Is the backend running (npm start in /backend)?");
++  }
++  const body = await res.json().catch(() => null);
++  if (!res.ok) throw new Error((body && typeof body.error === 'string' && body.error) || `Planner error (${res.status}).`);
++  return body as T;
++}
++
++// ---------- public API ----------
++export interface SurviveOptions {
++  location?: { lat: number; lng: number } | null;   // from getCurrentLocation()
++  demoNow?: { day: number; hour: string };           // freeze time, e.g. { day: 3, hour: '12:15pm' }
++  signal?: AbortSignal;
++}
++
++export async function getSurvivalRecommendation(query: string, opts: SurviveOptions = {}): Promise<LiveRecommendation> {
++  const r = await request<LiveRecommendation>('/api/survive', {
++    method: 'POST',
++    body: JSON.stringify({ query, location: opts.location ?? null, demoNow: opts.demoNow }),
++    signal: opts.signal
++  });
++  validateRecommendation(r);
++  (r.alternatives ?? []).forEach((a, i) => validateRecommendation(a, `alternative ${i + 1}`));
++  return r;
++}
++
++export const getPlaces = () => request<LivePlace[]>('/api/places');
++export const getCampusStatus = () => request<LiveRecommendation['campusStatus']>('/api/status');
++
++/** Browser GPS, or null if denied/unavailable. Never throws. */
++export function getCurrentLocation(timeoutMs = 4000): Promise<{ lat: number; lng: number } | null> {
++  return new Promise(resolve => {
++    if (!('geolocation' in navigator)) return resolve(null);
++    navigator.geolocation.getCurrentPosition(
++      p => resolve({ lat: p.coords.latitude, lng: p.coords.longitude }),
++      () => resolve(null),
++      { enableHighAccuracy: true, timeout: timeoutMs, maximumAge: 60_000 }
++    );
++  });
++}
+diff --git a/backend/package.json b/backend/package.json
+new file mode 100644
+index 0000000..690a07e
+--- /dev/null
++++ b/backend/package.json
+@@ -0,0 +1,13 @@
++{
++  "name": "campus-survival-backend",
++  "version": "1.0.0",
++  "private": true,
++  "type": "module",
++  "description": "Campus Survival Assistant API: Gemini parses and narrates, JavaScript does all the math.",
++  "engines": { "node": ">=18.17" },
++  "scripts": {
++    "start": "node server.js",
++    "test": "node --test",
++    "check": "node scripts/check.js"
++  }
++}
+diff --git a/backend/scripts/check.js b/backend/scripts/check.js
+new file mode 100644
+index 0000000..dd46755
+--- /dev/null
++++ b/backend/scripts/check.js
+@@ -0,0 +1,38 @@
++// npm run check                      -> data check + sample questions
++// npm run check -- "your sentence"   -> ask anything
++// Uses Gemini if GEMINI_API_KEY is in backend/.env, otherwise the rule-based parser.
++import { loadEnv } from "../src/env.js";
++loadEnv(new URL("../.env", import.meta.url));
++const { survive } = await import("../src/survive.js");
++const { validateCampus } = await import("../src/planner.js");
++const { demoNowFromEnv } = await import("../src/app.js");
++
++const v = validateCampus();
++console.log(`Data: ${v.ok ? "valid" : "INVALID"}`);
++v.errors.forEach(e => console.log("  error:", e));
++v.warnings.forEach(w => console.log("  warn: ", w));
++console.log(`Gemini: ${process.env.GEMINI_API_KEY ? "on" : "off (no key in backend/.env)"}`);
++
++const now = demoNowFromEnv() ?? { day: 3, hour: "12:15pm" };
++const asked = process.argv.slice(2).join(" ").trim();
++const questions = asked ? [asked] : [
++  "I have 30 min between CS 180 in SL 112 and my next class in ET and I'm hungry",
++  "I have 22 minutes to find coffee.",
++  "leaving tower in half an hour for ET, need a quiet spot to study",
++  "I have 8 minutes, I'm in North Hall, class in SL, starving",
++  "help im screwed, 4 min to get from campus center to innovation hall"
++];
++
++for (const q of questions) {
++  try {
++    const r = await survive({ query: q, now });
++    console.log(`\n> ${q}`);
++    console.log(`  ${r.mode.toUpperCase()}: ${r.location}  |  ${r.totalMinutes} min total, ${r.bufferMinutes} min buffer, ${r.risk}`);
++    console.log(`  ${r.steps.map(s => `${s.label} (${s.minutes})`).join("  →  ")}`);
++    if (r.panic) console.log(`  YOUR MOVE: ${r.panic.yourMove.title}`);
++    console.log(`  "${r.narration}"`);
++    console.log(`  [intent: ${r.ai.intent}, narration: ${r.ai.narration}]${r.ai.errors.length ? "  " + r.ai.errors.join(" | ") : ""}`);
++  } catch (e) {
++    console.log(`\n> ${q}\n  ${e.message}`);
++  }
++}
+diff --git a/backend/server.js b/backend/server.js
+new file mode 100644
+index 0000000..dcc504f
+--- /dev/null
++++ b/backend/server.js
+@@ -0,0 +1,17 @@
++// Start the backend:  npm start   (reads backend/.env)
++import { loadEnv } from "./src/env.js";
++loadEnv(new URL("./.env", import.meta.url));
++
++const { createApp, demoNowFromEnv } = await import("./src/app.js");
++const { validateCampus } = await import("./src/planner.js");
++
++const PORT = Number(process.env.PORT || 8787);
++const demo = demoNowFromEnv();
++const v = validateCampus();
++
++createApp().listen(PORT, () => {
++  console.log(`Campus Survival API  ->  http://localhost:${PORT}/api/health`);
++  console.log(`  Gemini:    ${process.env.GEMINI_API_KEY ? `on (${process.env.GEMINI_MODEL || "gemini-flash-latest"})` : "OFF (no GEMINI_API_KEY): using the rule-based parser"}`);
++  console.log(`  Demo time: ${demo ? `frozen at day ${demo.day}, ${demo.hour}` : "off (real Indianapolis time)"}`);
++  console.log(`  Data:      ${v.ok ? "valid" : "INVALID: " + v.errors.join("; ")}${v.warnings.length ? ` (${v.warnings.filter(w => w.includes("ESTIMATED")).length} estimated coordinates)` : ""}`);
++});
+diff --git a/backend/src/app.js b/backend/src/app.js
+new file mode 100644
+index 0000000..0c85b47
+--- /dev/null
++++ b/backend/src/app.js
+@@ -0,0 +1,88 @@
++// ============================================================
++// app.js — HTTP routes. No framework, no dependencies.
++//   POST /api/survive   { query, location?, demoNow? } -> SurvivalRecommendation (+ extras)
++//   GET  /api/places    directory for the Campus / Places views
++//   GET  /api/status    live campus status panel
++//   GET  /api/health    is the key set, is demo mode on, is the data valid
++// ============================================================
++import http from "node:http";
++import { survive, NeedsInfoError } from "./survive.js";
++import { directory, campusStatus, validateCampus, toClock, clockLabel } from "./planner.js";
++
++/** DEMO_MODE=1 -> Wednesday 12:15 PM. DEMO_NOW="3 12:15pm" -> any day (0=Sun) and time. */
++export function demoNowFromEnv(env = process.env) {
++  if (env.DEMO_NOW) {
++    const [day, ...rest] = env.DEMO_NOW.trim().split(/\s+/);
++    return { day: Number(day), hour: rest.join("") };
++  }
++  return env.DEMO_MODE === "1" ? { day: 3, hour: "12:15pm" } : null;
++}
++
++class HttpError extends Error { constructor(status, message) { super(message); this.status = status; } }
++
++async function readJson(req, limit = 10_000) {
++  let raw = "";
++  for await (const chunk of req) {
++    raw += chunk;
++    if (raw.length > limit) throw new HttpError(413, "Request body too large.");
++  }
++  if (!raw.trim()) return {};
++  try { return JSON.parse(raw); } catch { throw new HttpError(400, "Body must be valid JSON."); }
++}
++
++export function createApp({
++  apiKey = process.env.GEMINI_API_KEY,
++  fetchImpl = globalThis.fetch,
++  demoNow = demoNowFromEnv(),
++  corsOrigin = process.env.CORS_ORIGIN || "*"
++} = {}) {
++  return http.createServer(async (req, res) => {
++    const send = (status, body) => {
++      res.writeHead(status, {
++        "Content-Type": "application/json; charset=utf-8",
++        "Access-Control-Allow-Origin": corsOrigin,
++        "Access-Control-Allow-Methods": "GET, POST, OPTIONS",
++        "Access-Control-Allow-Headers": "Content-Type",
++        "Cache-Control": "no-store"
++      });
++      res.end(body === undefined ? "" : JSON.stringify(body));
++    };
++    const url = new URL(req.url, "http://localhost");
++    const route = `${req.method} ${url.pathname.replace(/\/+$/, "") || "/"}`;
++    const nowFor = override => {
++      if (override == null) return demoNow ?? undefined;
++      try { toClock(override); return override; } catch (e) { throw new HttpError(400, `Bad demoNow: ${e.message}`); }
++    };
++
++    try {
++      if (req.method === "OPTIONS") return send(204);
++      switch (route) {
++        case "GET /api/health": {
++          const v = validateCampus();
++          return send(200, {
++            ok: true, gemini: Boolean(apiKey), model: process.env.GEMINI_MODEL || "gemini-flash-latest",
++            demoMode: Boolean(demoNow), now: clockLabel(toClock(demoNow ?? undefined)),
++            data: { valid: v.ok, errors: v.errors, estimatedCoordinates: v.warnings.filter(w => w.includes("ESTIMATED")).length }
++          });
++        }
++        case "GET /api/places":
++          return send(200, directory(demoNow ?? undefined));
++        case "GET /api/status":
++          return send(200, campusStatus(demoNow ?? undefined));
++        case "POST /api/survive": {
++          const body = await readJson(req);
++          const location = body.location && typeof body.location === "object" ? body.location : null;
++          const out = await survive({ query: body.query, location, now: nowFor(body.demoNow), apiKey, fetchImpl });
++          return send(200, out);
++        }
++        default:
++          return send(404, { error: `No route for ${route}. Use POST /api/survive.` });
++      }
++    } catch (e) {
++      if (e instanceof NeedsInfoError) return send(422, { error: e.message, needs: e.needs });
++      if (e instanceof HttpError) return send(e.status, { error: e.message });
++      console.error(e);
++      return send(500, { error: "Something went wrong planning that. Try again.", detail: e.message });
++    }
++  });
++}
+diff --git a/backend/src/campus.js b/backend/src/campus.js
+new file mode 100644
+index 0000000..362e19e
+--- /dev/null
++++ b/backend/src/campus.js
+@@ -0,0 +1,276 @@
++// ============================================================
++// CAMPUS DATA — Purdue University in Indianapolis (shared IU Indy campus)
++//
++// RULES:
++//   - id unique across ALL three arrays
++//   - hours keyed 0=Sunday ... 6=Saturday, 24h decimals (e.g. 17.5 = 5:30pm)
++//     null = closed that day
++//   - vending machines get [0, 24] for all seven days
++//   - study spots: serviceMin = time to find a seat and settle in
++//   - serviceMin = realistic order-to-food time, not marketing time
++//
++// EXTRA FIELDS (safe to ignore in the UI):
++//   short    — what students call it; used in route labels ("Walk to SL")
++//   address  — street address, used for Google Maps links
++//   building — which building a food spot is inside (enables "same building = 2 min")
++//   verified — true = coordinates from a published source; false = ESTIMATED, fix it
++//
++// HOW TO VERIFY A COORDINATE (30 sec each):
++//   Google Maps -> right-click the building -> click the numbers at the top of the
++//   menu (copies "lat, lng") -> paste below -> set verified: true.
++//   On a phone: long-press the building, the pin shows the coordinates.
++//
++// SOURCES
++//   Coordinates: Wikipedia infoboxes for CE, UT (Hine Hall/University Tower), NH, EL.
++//   Building codes/addresses: IU Indy Campus Facility Services + Purdue emergency plans.
++//   Vendors: IU Indy Student Affairs (Campus Center), Purdue/IU meal plan pages.
++//   Tea's Me hours: IU Indianapolis Today, Aug 24 2026.
++//   University Library hours: IU LibCal (iu.libcal.com/hours), fall 2026.
++//   Campus Center building hours: life.indianapolis.iu.edu/campus-center (academic year).
++//   ALL OTHER HOURS ARE UNVERIFIED — check https://dineoncampus.com/iuindy in a browser.
++// ============================================================
++
++const ALL_DAY = { 0: [0, 24], 1: [0, 24], 2: [0, 24], 3: [0, 24], 4: [0, 24], 5: [0, 24], 6: [0, 24] };
++const weekdays = (open, close, fri = [open, close]) =>
++  ({ 0: null, 1: [open, close], 2: [open, close], 3: [open, close], 4: [open, close], 5: fri, 6: null });
++
++export const CAMPUS = {
++  buildings: [
++    {
++      // NOTE: "SL" is the Engineering, Science & Technology Building (CS dept office is SL 280,
++      // hackathon is SL 112). It is NOT the Science & Engineering Lab — that one is "EL".
++      id: "SL",
++      short: "SL",
++      name: "Engineering, Science & Technology Building (SL)",
++      aliases: ["sl", "es&t", "est", "engineering science and technology", "cs building", "computer science"],
++      address: "723 W Michigan St, Indianapolis, IN 46202",
++      lat: 39.7744, lng: -86.1703,
++      verified: false // ESTIMATED from address — you're sitting in it, grab your phone's location
++    },
++    {
++      id: "ET",
++      short: "ET",
++      name: "Engineering & Technology Building (ET)",
++      aliases: ["et", "engineering and technology", "engineering building", "student life office"],
++      address: "799 W Michigan St, Indianapolis, IN 46202",
++      lat: 39.7746, lng: -86.1722,
++      verified: false // ESTIMATED
++    },
++    {
++      id: "EL",
++      short: "Science & Engineering Lab (EL)",
++      name: "Science & Engineering Laboratory Building (EL)",
++      aliases: ["el", "selb", "science and engineering lab", "science & engineering lab", "stem lab building"],
++      address: "350 N Blackford St, Indianapolis, IN 46202",
++      lat: 39.77246, lng: -86.17058,
++      verified: true // Wikipedia. Under construction (STEM Lab addition) — some entrances may be closed
++    },
++    {
++      id: "LD",
++      short: "Science Building (LD)",
++      name: "Science Building (LD)",
++      aliases: ["ld", "science building", "science"],
++      address: "402 N Blackford St, Indianapolis, IN 46202",
++      lat: 39.7736, lng: -86.1707,
++      verified: false // ESTIMATED
++    },
++    {
++      id: "UL",
++      short: "University Library",
++      name: "University Library (UL)",
++      aliases: ["ul", "library", "lib", "university library"],
++      address: "755 W Michigan St, Indianapolis, IN 46202",
++      lat: 39.7744, lng: -86.1713,
++      verified: false // ESTIMATED
++    },
++    {
++      id: "IO",
++      short: "Innovation Hall",
++      name: "Innovation Hall (IO)",
++      aliases: ["io", "innovation hall", "innovation"],
++      address: "625 W Michigan St, Indianapolis, IN 46202",
++      lat: 39.7746, lng: -86.1677,
++      verified: false // ESTIMATED
++    },
++    {
++      id: "CE",
++      short: "Campus Center",
++      name: "Campus Center (CE)",
++      aliases: ["ce", "campus center", "campus centre", "student center", "food court"],
++      address: "420 University Blvd, Indianapolis, IN 46202",
++      lat: 39.77389, lng: -86.17611,
++      verified: true // Wikipedia
++    },
++    {
++      id: "UT",
++      short: "University Tower",
++      name: "University Tower (UT)",
++      aliases: ["ut", "tower", "university tower", "hine hall", "hine"],
++      address: "911 W North St, Indianapolis, IN 46202",
++      lat: 39.77514, lng: -86.17431,
++      verified: true // Wikipedia centroid of the Hine Hall + University Tower complex
++    },
++    {
++      id: "NH",
++      short: "North Hall",
++      name: "North Hall (NH)",
++      aliases: ["nh", "north hall", "north", "dorm"],
++      address: "820 W North St, Indianapolis, IN 46202",
++      lat: 39.776165, lng: -86.172817,
++      verified: true // Wikipedia
++    }
++  ],
++
++  dining: [
++    {
++      id: "TD",
++      name: "Tower Dining",
++      kind: "dining",
++      building: "UT",
++      aliases: ["tower dining", "dining hall", "the caf", "caf", "swipe"],
++      lat: 39.77514, lng: -86.17431,
++      serviceMin: 5, // all-you-care-to-eat: swipe in, grab a plate
++      hours: { 0: [9, 20], 1: [7, 20], 2: [7, 20], 3: [7, 20], 4: [7, 20], 5: [7, 20], 6: [9, 20] }, // UNVERIFIED
++      tags: ["hot food", "dining hall", "all-you-care-to-eat", "meal swipe", "salad bar", "stir fry", "burgers", "pizza", "dessert", "vegetarian"]
++    },
++    {
++      id: "CFA",
++      name: "Chick-fil-A (Campus Center, Level 1)",
++      kind: "dining",
++      building: "CE",
++      aliases: ["chick-fil-a", "chickfila", "cfa"],
++      lat: 39.77389, lng: -86.17611,
++      serviceMin: 7,
++      hours: weekdays(10.5, 19), // UNVERIFIED (Chick-fil-A is always closed Sundays)
++      tags: ["hot food", "chicken", "sandwiches", "salads", "fast food"]
++    },
++    {
++      id: "PANDA",
++      name: "Panda Express (Campus Center, Level 1)",
++      kind: "dining",
++      building: "CE",
++      aliases: ["panda", "panda express", "chinese"],
++      lat: 39.77389, lng: -86.17611,
++      serviceMin: 5,
++      hours: weekdays(10.5, 19), // UNVERIFIED
++      tags: ["hot food", "chinese-american", "rice", "noodles", "fast food"]
++    },
++    {
++      id: "PIZZA",
++      name: "Pizza Hut (Campus Center, Level 1)",
++      kind: "dining",
++      building: "CE",
++      aliases: ["pizza hut", "pizza"],
++      lat: 39.77389, lng: -86.17611,
++      serviceMin: 4, // pre-boxed pizzas on the stand
++      hours: weekdays(10.5, 19), // UNVERIFIED
++      tags: ["hot food", "pizza", "wings", "breadsticks", "fast food"]
++    },
++    {
++      id: "MARKET",
++      name: "The Market (Campus Center)",
++      kind: "dining",
++      building: "CE",
++      aliases: ["the market", "market", "convenience store"],
++      lat: 39.77389, lng: -86.17611,
++      serviceMin: 3,
++      hours: weekdays(8, 18, [8, 17]), // UNVERIFIED
++      tags: ["grab-and-go", "sandwiches", "snacks", "drinks"]
++    },
++    {
++      id: "CARIBOU",
++      name: "Caribou Coffee (Campus Center)",
++      kind: "dining",
++      building: "CE",
++      aliases: ["caribou", "caribou coffee", "coffee"],
++      lat: 39.77389, lng: -86.17611,
++      serviceMin: 5,
++      hours: weekdays(7.5, 17, [7.5, 15]), // UNVERIFIED
++      tags: ["coffee", "tea", "pastries", "drinks", "grab-and-go"]
++    },
++    {
++      id: "TEASME",
++      name: "Tea's Me Café (Campus Center)",
++      kind: "dining",
++      building: "CE",
++      aliases: ["tea's me", "teas me", "tea"],
++      lat: 39.77389, lng: -86.17611,
++      serviceMin: 6,
++      hours: weekdays(8, 19, [8, 17]), // VERIFIED weekdays (IU Today, fall 2026); weekends not listed
++      tags: ["tea", "smoothies", "espresso", "breakfast", "lunch", "study spot"]
++    }
++  ],
++
++  vending: [
++    {
++      id: "V_SL",
++      name: "Vending — SL",
++      kind: "vending",
++      building: "SL",
++      aliases: ["sl vending", "vending sl"],
++      lat: 39.7744, lng: -86.1703,
++      serviceMin: 2,
++      hours: ALL_DAY, // machine is 24/7; you can only reach it while SL is unlocked
++      tags: ["snacks", "drinks"]
++      // TODO: add the floor/spot to the name once someone walks by ("SL 1st floor, by the stairs")
++    },
++    {
++      id: "V_NH",
++      name: "Vending — North Hall",
++      kind: "vending",
++      building: "NH",
++      aliases: ["north hall vending", "vending north hall"],
++      lat: 39.776165, lng: -86.172817,
++      serviceMin: 2,
++      hours: ALL_DAY, // likely card-access (residents) after hours
++      tags: ["snacks", "drinks"]
++    },
++    {
++      id: "V_CE",
++      name: "Vending — Campus Center",
++      kind: "vending",
++      building: "CE",
++      aliases: ["campus center vending", "vending campus center"],
++      lat: 39.77389, lng: -86.17611,
++      serviceMin: 2,
++      hours: ALL_DAY,
++      tags: ["snacks", "drinks"]
++    },
++    {
++      id: "V_UT",
++      name: "Vending — Tower Dining area",
++      kind: "vending",
++      building: "UT",
++      aliases: ["tower vending", "vending tower"],
++      lat: 39.77514, lng: -86.17431,
++      serviceMin: 2,
++      hours: ALL_DAY, // likely card-access (residents) after hours
++      tags: ["snacks", "drinks"]
++    }
++  ],
++
++  study: [
++    {
++      id: "S_UL",
++      name: "University Library",
++      kind: "study",
++      building: "UL",
++      aliases: ["library study", "study at the library", "quiet study"],
++      lat: 39.7744, lng: -86.1713,
++      serviceMin: 3,
++      hours: { 0: [12, 20], 1: [8, 23], 2: [8, 23], 3: [8, 23], 4: [8, 23], 5: [8, 18], 6: [10, 18] }, // VERIFIED (LibCal, fall 2026)
++      tags: ["quiet", "study rooms", "study"]
++    },
++    {
++      id: "S_CE",
++      name: "Campus Center study lounges",
++      kind: "study",
++      building: "CE",
++      aliases: ["campus center study", "study lounge"],
++      lat: 39.77389, lng: -86.17611,
++      serviceMin: 2,
++      hours: { 0: [10, 22], 1: [7, 22], 2: [7, 22], 3: [7, 22], 4: [7, 22], 5: [7, 22], 6: [7, 22] }, // VERIFIED (building hours, academic year)
++      tags: ["study", "food nearby", "social"]
++    }
++  ]
++};
+diff --git a/backend/src/contract.js b/backend/src/contract.js
+new file mode 100644
+index 0000000..cb1ecd7
+--- /dev/null
++++ b/backend/src/contract.js
+@@ -0,0 +1,42 @@
++// ============================================================
++// contract.js — enforces the frontend's SurvivalRecommendation rules
++// (frontend/src/types/campus.ts + docs/BACKEND_INTEGRATION.md) on every
++// response, so the UI never receives something it can't render.
++// ============================================================
++export const RISKS = ["safe", "tight", "screwed"];
++export const STEP_TYPES = ["walk", "food", "class"];
++
++/** Frontend timing rule: negative = screwed, 0–3 = tight, 4+ = safe. */
++export const riskOf = buffer => (buffer < 0 ? "screwed" : buffer <= 3 ? "tight" : "safe");
++
++export function checkRecommendation(r, path = "response") {
++  const errs = [];
++  const bad = (field, why) => errs.push(`${path}.${field}: ${why}`);
++  if (!r || typeof r !== "object") return [`${path}: not an object`];
++  if (typeof r.location !== "string" || !r.location.trim()) bad("location", "must be a nonempty string");
++  for (const f of ["totalMinutes", "bufferMinutes"]) if (!Number.isFinite(r[f])) bad(f, "must be a finite number");
++  if (!RISKS.includes(r.risk)) bad("risk", `must be one of ${RISKS.join(", ")}`);
++  if (!Array.isArray(r.reason) || !r.reason.every(s => typeof s === "string" && s.trim())) bad("reason", "must be an array of nonempty strings");
++  if (!Array.isArray(r.steps) || !r.steps.length) bad("steps", "must be a nonempty array");
++  else r.steps.forEach((s, i) => {
++    if (!STEP_TYPES.includes(s?.type)) bad(`steps[${i}].type`, `must be one of ${STEP_TYPES.join(", ")}`);
++    if (typeof s?.label !== "string" || !s.label.trim()) bad(`steps[${i}].label`, "must be a nonempty string");
++    if (!Number.isFinite(s?.minutes) || s.minutes < 0) bad(`steps[${i}].minutes`, "must be a finite number >= 0");
++  });
++  if (!errs.length) {
++    const sum = r.steps.reduce((a, s) => a + s.minutes, 0);
++    if (sum !== r.totalMinutes) bad("totalMinutes", `must equal the sum of steps (${sum})`);
++    if (Number.isFinite(r.availableMinutes) && r.availableMinutes - r.totalMinutes !== r.bufferMinutes) bad("bufferMinutes", "must equal availableMinutes - totalMinutes");
++    if (riskOf(r.bufferMinutes) !== r.risk) bad("risk", `must be "${riskOf(r.bufferMinutes)}" for a ${r.bufferMinutes} min buffer`);
++  }
++  return errs;
++}
++
++export function checkResponse(r) {
++  const errs = checkRecommendation(r);
++  (r?.alternatives ?? []).forEach((a, i) => errs.push(...checkRecommendation(a, `alternatives[${i}]`)));
++  (r?.panic?.options ?? []).forEach((o, i) => {
++    if (!Number.isFinite(o.minutes) || !Number.isFinite(o.delta) || typeof o.makesIt !== "boolean") errs.push(`panic.options[${i}]: bad numbers`);
++  });
++  return errs;
++}
+diff --git a/backend/src/env.js b/backend/src/env.js
+new file mode 100644
+index 0000000..53c1305
+--- /dev/null
++++ b/backend/src/env.js
+@@ -0,0 +1,16 @@
++// Tiny .env loader (no dependencies). Real environment variables win over the file.
++import fs from "node:fs";
++
++export function loadEnv(fileUrl) {
++  let text;
++  try { text = fs.readFileSync(fileUrl, "utf8"); } catch { return false; }
++  for (const line of text.split(/\r?\n/)) {
++    if (!line.trim() || line.trim().startsWith("#")) continue;
++    const m = line.match(/^\s*([A-Za-z_][A-Za-z0-9_]*)\s*=\s*(.*?)\s*$/);
++    if (!m) continue;
++    let v = m[2];
++    if (/^(['"]).*\1$/.test(v)) v = v.slice(1, -1);
++    if (process.env[m[1]] === undefined) process.env[m[1]] = v;
++  }
++  return true;
++}
+diff --git a/backend/src/gemini.js b/backend/src/gemini.js
+new file mode 100644
+index 0000000..6851c11
+--- /dev/null
++++ b/backend/src/gemini.js
+@@ -0,0 +1,68 @@
++// ============================================================
++// gemini.js — one function that talks to Google AI Studio.
++// The key goes in a header (never the URL, so it doesn't end up in logs).
++// ============================================================
++
++export class GeminiError extends Error {
++  constructor(code, message) { super(message); this.code = code; }
++}
++
++/**
++ * callGemini({ apiKey, prompt, system?, schema?, temperature?, timeoutMs?, model?, fetchImpl? })
++ *   schema given -> returns parsed JSON that follows it
++ *   no schema    -> returns plain text
++ */
++export async function callGemini({
++  apiKey = process.env.GEMINI_API_KEY,
++  model = process.env.GEMINI_MODEL || "gemini-flash-latest",
++  prompt, system, schema, temperature = 0.2,
++  timeoutMs = Number(process.env.GEMINI_TIMEOUT_MS || 12000),
++  fetchImpl = fetch
++}) {
++  if (!apiKey) throw new GeminiError("no_key", "GEMINI_API_KEY is not set");
++
++  const url = `https://generativelanguage.googleapis.com/v1beta/models/${model}:generateContent`;
++  const body = {
++    ...(system ? { systemInstruction: { parts: [{ text: system }] } } : {}),
++    contents: [{ role: "user", parts: [{ text: prompt }] }],
++    generationConfig: {
++      temperature,
++      ...(schema ? { responseMimeType: "application/json", responseSchema: schema } : {})
++    }
++  };
++
++  const ctrl = new AbortController();
++  const timer = setTimeout(() => ctrl.abort(), timeoutMs);
++  let res;
++  try {
++    res = await fetchImpl(url, {
++      method: "POST",
++      headers: { "Content-Type": "application/json", "x-goog-api-key": apiKey },
++      body: JSON.stringify(body),
++      signal: ctrl.signal
++    });
++  } catch (e) {
++    throw new GeminiError("network", e.name === "AbortError" ? `timed out after ${timeoutMs} ms` : e.message);
++  } finally {
++    clearTimeout(timer);
++  }
++
++  const data = await res.json().catch(() => ({}));
++  if (!res.ok) {
++    const hint = res.status === 404 ? ` (is "${model}" a valid model id?)` : res.status === 429 ? " (rate limited)" : "";
++    throw new GeminiError(`http_${res.status}`, `${data.error?.message ?? `HTTP ${res.status}`}${hint}`);
++  }
++
++  const parts = data.candidates?.[0]?.content?.parts ?? [];
++  const text = parts.filter(p => typeof p.text === "string" && !p.thought).map(p => p.text).join("").trim();
++  if (!text) {
++    const why = data.promptFeedback?.blockReason ?? data.candidates?.[0]?.finishReason ?? "no text";
++    throw new GeminiError("empty", `Gemini returned no text (${why})`);
++  }
++  if (!schema) return text;
++  try {
++    return JSON.parse(text.replace(/^```(?:json)?\s*/i, "").replace(/\s*```$/, ""));
++  } catch {
++    throw new GeminiError("bad_json", "Gemini returned invalid JSON");
++  }
++}
+diff --git a/backend/src/intent.js b/backend/src/intent.js
+new file mode 100644
+index 0000000..03977ed
+--- /dev/null
++++ b/backend/src/intent.js
+@@ -0,0 +1,228 @@
++// ============================================================
++// intent.js — stage 1: turn a messy sentence into structured intent.
++// Gemini does it when available; a rule-based parser takes over if the key
++// is missing, the model is slow, or it returns something invalid.
++// ============================================================
++import { CAMPUS } from "./campus.js";
++import { callGemini } from "./gemini.js";
++import { getPlace, resolvePlace, clockLabel, parseTime } from "./planner.js";
++
++const GOALS = ["food", "coffee", "study", "travel"];
++const DAY_NAMES = ["Sunday", "Monday", "Tuesday", "Wednesday", "Thursday", "Friday", "Saturday"];
++
++export const INTENT_SCHEMA = {
++  type: "OBJECT",
++  properties: {
++    origin: { type: "STRING", nullable: true, description: "Building id the student is in or leaving from" },
++    destination: { type: "STRING", nullable: true, description: "Building id of the next class or where they must get to" },
++    minutesAvailable: { type: "INTEGER", nullable: true, description: "Stated duration in minutes" },
++    classTime: { type: "STRING", nullable: true, description: 'Stated start time of the next class, e.g. "12:45pm"' },
++    goal: { type: "STRING", format: "enum", enum: GOALS },
++    urgent: { type: "BOOLEAN" },
++    wants: { type: "ARRAY", items: { type: "STRING" } },
++    avoids: { type: "ARRAY", items: { type: "STRING" } },
++    usesCurrentLocation: { type: "BOOLEAN" }
++  },
++  required: ["goal", "urgent", "wants", "avoids", "usesCurrentLocation"]
++};
++
++function intentPrompt(query, clock) {
++  const buildings = CAMPUS.buildings
++    .map(b => `${b.id} = ${b.name} (also called: ${b.aliases.join(", ")})`).join("\n");
++  const spots = [...CAMPUS.dining, ...CAMPUS.vending, ...(CAMPUS.study ?? [])].map(p => p.name).join("; ");
++  return `Extract structured intent from a student's message to a campus assistant at Purdue University in Indianapolis.
++Current time: ${DAY_NAMES[clock.day]} ${clockLabel(clock).split(" ").slice(1).join(" ")}.
++
++Buildings (use these ids exactly for origin/destination):
++${buildings}
++
++Food, coffee, vending and study places (never an origin or destination; if the student names one, put it in "wants"):
++${spots}
++
++Message: """${query}"""
++
++Rules:
++- origin: building the student is in or leaving from. A room like "SL 112" means SL. Course names like "CS 180" are NOT buildings.
++- destination: building of the next class, or where they need to get to.
++- If a building isn't in the list (e.g. "University Hall"), use null. Never guess.
++- minutesAvailable: only a stated duration. "half an hour" = 30.
++- classTime: only a stated start time for the next class.
++- goal: food (hungry, lunch, eat, snack), coffee (coffee, tea, caffeine, boba), study (study, homework, quiet spot), travel (just getting somewhere).
++- urgent: true if they're late, panicking, say "screwed", or the time sounds impossible.
++- wants / avoids: specific foods or places they ask for or rule out, lowercase.
++- usesCurrentLocation: true only if they say "here", "where I am", or "near me".
++- Do not compute times or distances.`;
++}
++
++// ---------- validation ----------
++const asBuilding = v => {
++  if (typeof v !== "string" || !v.trim()) return { id: null };
++  const p = resolvePlace(v);
++  if (!p) return { id: null };
++  if (p.kind === "building") return { id: p.id };
++  return { id: null, want: p.name.split(" (")[0].toLowerCase() }; // a food/study place -> it's a "want"
++};
++const strList = v => Array.isArray(v) ? v.filter(s => typeof s === "string" && s.trim()).map(s => s.trim().toLowerCase()).slice(0, 8) : [];
++
++export function sanitizeIntent(raw) {
++  if (!raw || typeof raw !== "object") throw new Error("intent is not an object");
++  const o = asBuilding(raw.origin), d = asBuilding(raw.destination);
++  let minutes = Number.isFinite(raw.minutesAvailable) ? Math.round(raw.minutesAvailable) : null;
++  if (minutes != null && (minutes < 1 || minutes > 600)) minutes = null;
++  let classTime = typeof raw.classTime === "string" && raw.classTime.trim() ? raw.classTime.trim() : null;
++  if (classTime) { try { parseTime(classTime); } catch { classTime = null; } }
++  return {
++    origin: o.id,
++    destination: d.id,
++    minutesAvailable: minutes,
++    classTime,
++    goal: GOALS.includes(raw.goal) ? raw.goal : "food",
++    urgent: raw.urgent === true,
++    wants: [...new Set([...strList(raw.wants), ...[o.want, d.want].filter(Boolean)])],
++    avoids: strList(raw.avoids),
++    usesCurrentLocation: raw.usesCurrentLocation === true
++  };
++}
++
++// ---------- rule-based fallback ----------
++const STOP_ALIASES = new Set(["north", "science", "dorm", "computer science", "engineering", "tea", "coffee", "swipe", "caf", "pizza", "market", "chinese", "food court"]);
++const FOOD_WORDS = ["pizza", "chicken", "chinese", "salad", "burger", "burgers", "sandwich", "coffee", "tea", "smoothie", "stir fry", "dessert", "vegetarian", "snack", "boba", "wings", "noodles", "rice"];
++const norm = s => s.toLowerCase().replace(/[’']/g, "'").replace(/[^a-z0-9&': ]/g, " ").replace(/:(?!\d)/g, " ").replace(/\s+/g, " ").trim();
++
++function buildingPhrases() {
++  const out = [];
++  for (const b of CAMPUS.buildings) {
++    for (const a of [b.name.replace(/\s*\([^)]*\)$/, ""), b.short, ...(b.aliases ?? [])]) {
++      const n = a && norm(a);
++      if (n && n.length > 2 && !STOP_ALIASES.has(n)) out.push({ phrase: n, id: b.id });
++    }
++  }
++  return out.sort((a, b) => b.phrase.length - a.phrase.length);
++}
++const PHRASES = buildingPhrases();
++const CODES = new Set(CAMPUS.buildings.map(b => b.id));
++
++// Food/study place names ("Tower Dining", "Campus Center study") are wants, not buildings: hide them first.
++const SPOT_PHRASES = [...CAMPUS.dining, ...CAMPUS.vending, ...(CAMPUS.study ?? [])]
++  .flatMap(p => [p.name.replace(/\s*\([^)]*\)$/, ""), ...(p.aliases ?? [])])
++  .map(s => norm(s)).filter(s => s.split(" ").length >= 2)
++  .sort((a, b) => b.length - a.length);
++const esc = s => s.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
++const DEST_WORDS = new Set(["class", "lecture", "lab", "next", "exam", "meeting", "headed", "heading", "going", "towards", "toward"]);
++const ORIGIN_WORDS = new Set(["from", "at", "in", "leaving", "near", "im", "i'm", "out", "inside"]);
++
++function roleFor(text, index) {
++  // Only look inside the current clause: words since the last "and / but / then / so".
++  const words = text.slice(0, index).split(" ").filter(Boolean);
++  let start = words.length;
++  while (start > 0 && !["and", "but", "then", "so"].includes(words[start - 1]) && words.length - start < 8) start--;
++  const clause = words.slice(start);
++  const lastTwo = clause.slice(-2);
++  if (clause.some(w => DEST_WORDS.has(w)) || lastTwo.includes("to") || lastTwo.includes("for")) return "destination";
++  if (clause.some(w => ORIGIN_WORDS.has(w))) return "origin";
++  return null;
++}
++
++function findBuildingMentions(query) {
++  let text = norm(query);
++  for (const s of SPOT_PHRASES) text = text.replace(new RegExp(`\\b${esc(s)}\\b`, "g"), m => "_".repeat(m.length));
++  const found = [];
++  const taken = new Array(text.length).fill(false);
++  const claim = (start, len, id) => {
++    for (let i = start; i < start + len; i++) if (taken[i]) return;
++    for (let i = start; i < start + len; i++) taken[i] = true;
++    found.push({ id, index: start });
++  };
++  for (const { phrase, id } of PHRASES) {
++    for (const m of text.matchAll(new RegExp(`\\b${esc(phrase)}\\b`, "g"))) claim(m.index, phrase.length, id);
++  }
++  // Two-letter building codes: "SL", "sl 112", "in sl"
++  for (const m of text.matchAll(/\b([a-z]{2})\b(\s*\d{2,4})?/g)) {
++    const code = m[1].toUpperCase();
++    if (!CODES.has(code)) continue;
++    const before = text.slice(0, m.index).split(" ").filter(Boolean).slice(-1)[0];
++    const originalIsCaps = new RegExp(`\\b${code}\\b`).test(query);
++    if (originalIsCaps || m[2] || ["in", "at", "from", "to", "near", "leaving", "by", "for"].includes(before)) claim(m.index, 2, code);
++  }
++  return found.sort((a, b) => a.index - b.index).map(f => ({ ...f, role: roleFor(text, f.index) }));
++}
++
++function wordsToMinutes(text) {
++  const m = text.match(/(\d{1,3})\s*-?\s*(?:min|mins|minute|minutes)\b/);
++  if (m) return Number(m[1]);
++  if (/\bhalf (?:an )?hour\b/.test(text)) return 30;
++  const h = text.match(/(\d{1,2})\s*(?:hr|hrs|hour|hours)\b/);
++  if (h) return Number(h[1]) * 60;
++  if (/\b(?:an|one) hour\b/.test(text)) return 60;
++  if (/\bquarter (?:of an )?hour\b/.test(text)) return 15;
++  return null;
++}
++
++export function fallbackIntent(query) {
++  const text = norm(query);
++  const mentions = findBuildingMentions(query);
++  let origin = mentions.find(m => m.role === "origin")?.id ?? null;
++  let destination = mentions.find(m => m.role === "destination" && m.id !== origin)?.id ?? null;
++  const unassigned = mentions.filter(m => m.id !== origin && m.id !== destination);
++  if (/\bbetween\b/.test(text) && mentions.length >= 2 && !destination) { origin = mentions[0].id; destination = mentions[1].id; }
++  for (const m of unassigned) {
++    if (!origin) origin = m.id; else if (!destination && m.id !== origin) destination = m.id;
++  }
++
++  const minutesAvailable = wordsToMinutes(text);
++  let classTime = null;
++  if (minutesAvailable == null) {
++    const t = text.match(/\b(?:class|lecture|lab|exam|meeting)\b[^.]*?\b(?:at|by|starts at)\s+(\d{1,2}(?::\d{2})?\s*(?:am|pm)?)\b/) ||
++              text.match(/\bby\s+(\d{1,2}(?::\d{2})?\s*(?:am|pm)?)\b/) ||
++              text.match(/\b(\d{1,2}:\d{2}\s*(?:am|pm)?|\d{1,2}\s*(?:am|pm))\s+(?:class|lecture|lab)\b/);
++    if (t) classTime = t[1].replace(/\s+/g, "");
++  }
++
++  const wants = [], avoids = [];
++  const spotNames = [...CAMPUS.dining, ...(CAMPUS.study ?? [])].flatMap(p => [p.name.split(" (")[0], ...(p.aliases ?? [])]).map(norm);
++  for (const w of [...new Set([...spotNames, ...FOOD_WORDS])]) {
++    const i = text.search(new RegExp(`\\b${w.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}\\b`));
++    if (i < 0) continue;
++    const before = text.slice(0, i).split(" ").filter(Boolean).slice(-2);
++    (before.some(x => ["no", "not", "avoid", "skip", "except", "without", "but", "hate"].includes(x)) ? avoids : wants).push(w);
++  }
++
++  const goal =
++    /\b(coffee|caffeine|latte|espresso|tea|boba|smoothie)\b/.test(text) ? "coffee" :
++    /\b(study|studying|homework|quiet|focus)\b/.test(text) && !/\b(hungry|food|eat|lunch)\b/.test(text) ? "study" :
++    /\b(hungry|starving|food|eat|eating|lunch|dinner|breakfast|snack|bite|grab something|famished)\b/.test(text) || wants.length ? "food" :
++    "travel";
++
++  return {
++    origin, destination, minutesAvailable, classTime, goal,
++    urgent: /\b(screwed|late|hurry|rush|asap|panic|panicking|help|running|sprint)\b/.test(text),
++    wants: wants.filter(w => !["library"].includes(w)).slice(0, 8), avoids: avoids.slice(0, 8),
++    usesCurrentLocation: /\b(here|where i am|near me|my location)\b/.test(text)
++  };
++}
++
++// ---------- entry point ----------
++export async function parseIntent(query, { clock, apiKey, fetchImpl, skipAI = false } = {}) {
++  const rules = fallbackIntent(query);
++  if (skipAI || !(apiKey ?? process.env.GEMINI_API_KEY)) {
++    return { intent: rules, source: "rules", error: skipAI ? null : "GEMINI_API_KEY not set" };
++  }
++  try {
++    const raw = await callGemini({ apiKey, fetchImpl, prompt: intentPrompt(query, clock), schema: INTENT_SCHEMA, temperature: 0.1 });
++    const ai = sanitizeIntent(raw);
++    // Fill gaps the model left that the rules caught (never override the model).
++    return {
++      intent: {
++        ...ai,
++        origin: ai.origin ?? rules.origin,
++        destination: ai.destination ?? (rules.destination !== (ai.origin ?? rules.origin) ? rules.destination : null),
++        minutesAvailable: ai.minutesAvailable ?? (ai.classTime ? null : rules.minutesAvailable)
++      },
++      source: "gemini", error: null
++    };
++  } catch (e) {
++    return { intent: rules, source: "rules", error: `intent: ${e.message}` };
++  }
++}
++
++export const _test = { findBuildingMentions, getPlace };
+diff --git a/backend/src/narrate.js b/backend/src/narrate.js
+new file mode 100644
+index 0000000..f40ff94
+--- /dev/null
++++ b/backend/src/narrate.js
+@@ -0,0 +1,68 @@
++// ============================================================
++// narrate.js — stage 3: Gemini writes the recommendation over numbers
++// that were already computed. It is told never to change them.
++// ============================================================
++import { callGemini } from "./gemini.js";
++
++const cap = s => (s ? s.charAt(0).toUpperCase() + s.slice(1) : s);
++
++const SYSTEM = `You are the Campus Survival Assistant for Purdue University in Indianapolis.
++The app already computed every number below from real distances and opening hours. They are correct.
++Never change, recompute, round, or add numbers. Never invent places, menu items, or hours.
++Write 2 or 3 short sentences, at most 60 words, plain text only: no markdown, no lists, no emoji.
++Lead with the pick and its time breakdown. Then give one runner-up, or say why a place the student asked for was skipped.
++If a vending machine is the pick, recommend it plainly; it's a real answer, not a consolation prize.
++If the student will be late, say so directly and calmly and tell them to go now.`;
++
++function summarize(rec, query) {
++  return {
++    studentAsked: query,
++    mode: rec.mode,
++    minutesAvailable: rec.availableMinutes,
++    from: rec.origin?.name, to: rec.destination?.name,
++    pick: {
++      name: rec.location, risk: rec.risk, totalMinutes: rec.totalMinutes, bufferMinutes: rec.bufferMinutes,
++      steps: rec.steps.map(s => `${s.label}: ${s.minutes} min`), closesAt: rec.stop?.closesAt ?? null
++    },
++    runnerUp: rec.alternatives?.[0]
++      ? { name: rec.alternatives[0].location, totalMinutes: rec.alternatives[0].totalMinutes, bufferMinutes: rec.alternatives[0].bufferMinutes }
++      : null,
++    skipped: (rec.rejected ?? []).slice(0, 3).map(r => `${r.location}: ${r.reason}`),
++    panic: rec.panic ? { yourMove: rec.panic.yourMove, options: rec.panic.options.map(o => `${o.label}: ${o.minutes} min, ${o.note}`) } : null,
++    assumptions: rec.assumptions
++  };
++}
++
++export function fallbackNarration(rec) {
++  const [a, b, c] = rec.steps;
++  const alt = rec.alternatives?.[0];
++  if (rec.mode === "panic" && rec.panic) {
++    const m = rec.panic.yourMove;
++    return `${m.title.charAt(0)}${m.title.slice(1).toLowerCase()}. ${m.detail}`;
++  }
++  if (rec.mode === "travel") {
++    const extra = rec.bufferMinutes < 0 ? ` You'll be about ${-rec.bufferMinutes} min late, so go now.` : ` That leaves ${rec.bufferMinutes} min to spare.`;
++    return `${a.label}: ${a.minutes} min.${extra}`;
++  }
++  if (!b) return `${a.label}: ${a.minutes} min, with ${rec.bufferMinutes} min to spare.`;
++  const what = rec.mode === "study" ? `${b.minutes} min to settle in and study` : `${b.minutes} min to ${b.label.toLowerCase()}`;
++  let text = `Go to ${rec.location}: ${a.minutes} min walk, ${what}, then ${c.minutes} min to class, leaving ${rec.bufferMinutes} min of buffer.`;
++  if (alt && alt.bufferMinutes >= 0) text += ` ${cap(alt.location)} also works with ${alt.bufferMinutes} min to spare.`;
++  else if (rec.rejected?.[0]) text += ` ${cap(rec.rejected[0].location)} won't work: ${rec.rejected[0].reason}.`;
++  return text;
++}
++
++export async function narrate(rec, { query, apiKey, fetchImpl, skipAI = false } = {}) {
++  if (skipAI || !(apiKey ?? process.env.GEMINI_API_KEY)) {
++    return { text: fallbackNarration(rec), source: "template", error: skipAI ? null : "GEMINI_API_KEY not set" };
++  }
++  try {
++    const text = await callGemini({
++      apiKey, fetchImpl, system: SYSTEM, temperature: 0.5,
++      prompt: `Computed plan (JSON):\n${JSON.stringify(summarize(rec, query), null, 2)}\n\nWrite the recommendation.`
++    });
++    return { text: text.replace(/\*\*/g, "").trim(), source: "gemini", error: null };
++  } catch (e) {
++    return { text: fallbackNarration(rec), source: "template", error: `narration: ${e.message}` };
++  }
++}
+diff --git a/backend/src/planner.js b/backend/src/planner.js
+new file mode 100644
+index 0000000..1f0a94e
+--- /dev/null
++++ b/backend/src/planner.js
+@@ -0,0 +1,488 @@
++// ============================================================
++// planner.js — every number the app shows comes from here.
++// Pure JavaScript, no AI, no network. Gemini never does math.
++// ============================================================
++import { CAMPUS } from "./campus.js";
++
++export const CONFIG = {
++  tz: "America/Indiana/Indianapolis",
++  walkMPerMin: 80,      // normal walk (~3 mph)
++  briskMPerMin: 100,    // "I'm late" walk
++  jogMPerMin: 150,      // jogging with a backpack
++  detourFactor: 1.25,   // straight line -> real sidewalks, crossings, doors
++  doorMin: 1,           // leaving one building + entering another
++  sameBuildingMin: 2,   // reaching a spot inside the building you're already in
++  defaultEatMin: 10,
++  minEatMin: 5,         // less than this and it's "take it to go"
++  comfortBufferMin: 5,  // shrink eating time before cutting buffer below this
++  minBufferMin: 2,      // never recommend a plan with less slack than this
++  lastCallMin: 5,       // don't send people to a place that closes in < 5 min
++  studyBufferMin: 5,
++  minStudyMin: 10,      // a study stop shorter than this isn't worth it
++  corridorFactor: 1.35, // a snack stop is "on the way" if it adds < 35% distance
++  insideRadiusM: 60,
++  onCampusRadiusM: 700,
++  rush: [               // estimated weekday lines, multiplies dining serviceMin
++    { start: 11.5, end: 13.25, factor: 1.6 },
++    { start: 17, end: 18.5, factor: 1.3 }
++  ]
++};
++
++// ---------- places ----------
++const BUILDINGS = CAMPUS.buildings.map(b => ({ ...b, kind: "building" }));
++const FOOD = [...CAMPUS.dining, ...CAMPUS.vending];
++const STUDY = CAMPUS.study ?? [];
++const ALL = [...BUILDINGS, ...FOOD, ...STUDY];
++const BY_ID = new Map(ALL.map(p => [p.id.toUpperCase(), p]));
++
++export const buildingIds = () => BUILDINGS.map(b => b.id);
++export const getPlace = id => BY_ID.get(String(id).toUpperCase()) ?? null;
++export const shortName = p => (p?.name ?? "").replace(/\s*\([^)]*\)\s*$/, "");
++/** What a person would call it: "Chick-fil-A", "the SL vending machine", "University Library". */
++export const displayName = p => p?.kind === "vending" ? `the ${p.building} vending machine` : (p?.short ?? shortName(p));
++const buildingOf = p => (p.kind === "building" ? p.id : p.building ?? null);
++const norm = s => String(s).toLowerCase().replace(/[^a-z0-9&' ]/g, " ").replace(/\s+/g, " ").trim();
++const DAYS = ["Sun", "Mon", "Tue", "Wed", "Thu", "Fri", "Sat"];
++
++export function listPlaces() {
++  return ALL.map(p => ({ id: p.id, name: p.name, kind: p.kind, building: p.building ?? null, aliases: p.aliases ?? [] }));
++}
++
++/** id ("SL"), room ("SL 112"), alias ("tower"), name fragment, or GPS {lat, lng}. */
++export function resolvePlace(ref) {
++  if (ref == null || ref === "") return null;
++  if (typeof ref === "object" && typeof ref.lat === "number" && typeof ref.lng === "number") {
++    const here = whereAmI(ref.lat, ref.lng);
++    return {
++      id: "YOU", kind: "point", lat: ref.lat, lng: ref.lng,
++      name: here.inside ? here.name : `your location (near ${shortName(getPlace(here.id))})`,
++      building: here.inside ? here.id : null
++    };
++  }
++  if (typeof ref === "object" && ref.id) return resolvePlace(ref.id);
++
++  const raw = String(ref).trim();
++  const upper = raw.toUpperCase();
++  if (BY_ID.has(upper)) return BY_ID.get(upper);
++  const room = upper.match(/^([A-Z]{2,3})[\s-]?\d{1,4}[A-Z]?$/);
++  if (room && BY_ID.has(room[1])) return BY_ID.get(room[1]);
++
++  const q = norm(raw);
++  const exact = ALL.find(p => p.aliases?.some(a => norm(a) === q) || norm(p.name) === q || norm(shortName(p)) === q);
++  if (exact) return exact;
++  if (q.length >= 3) {
++    const partial = ALL.filter(p => norm(p.name).includes(q) || p.aliases?.some(a => norm(a).includes(q)));
++    if (partial.length) return partial.find(p => p.kind === "building") ?? partial[0];
++  }
++  return null;
++}
++
++/** Like resolvePlace, but a food/study place resolves to the building it's in. */
++export function resolveBuilding(ref) {
++  const p = resolvePlace(ref);
++  if (!p) return null;
++  if (p.kind === "building" || p.kind === "point") return p;
++  return getPlace(p.building) ?? p;
++}
++
++// ---------- geometry ----------
++export function haversineM(lat1, lng1, lat2, lng2) {
++  const R = 6371000, toRad = d => (d * Math.PI) / 180;
++  const dLat = toRad(lat2 - lat1), dLng = toRad(lng2 - lng1);
++  const a = Math.sin(dLat / 2) ** 2 + Math.cos(toRad(lat1)) * Math.cos(toRad(lat2)) * Math.sin(dLng / 2) ** 2;
++  return 2 * R * Math.asin(Math.sqrt(a));
++}
++
++export function whereAmI(lat, lng) {
++  let best = null;
++  for (const b of BUILDINGS) {
++    const d = haversineM(lat, lng, b.lat, b.lng);
++    if (!best || d < best.d) best = { b, d };
++  }
++  return {
++    id: best.b.id, name: best.b.name, distanceM: Math.round(best.d),
++    inside: best.d <= CONFIG.insideRadiusM, onCampus: best.d <= CONFIG.onCampusRadiusM
++  };
++}
++
++export function walkInfo(a, b, pace = "walk") {
++  const ba = buildingOf(a), bb = buildingOf(b);
++  if (ba && ba === bb) return { meters: 0, min: a.id === b.id ? 0 : CONFIG.sameBuildingMin, sameBuilding: true };
++  const speed = { walk: CONFIG.walkMPerMin, brisk: CONFIG.briskMPerMin, jog: CONFIG.jogMPerMin }[pace];
++  if (!speed) throw new Error(`Unknown pace "${pace}"`);
++  const meters = haversineM(a.lat, a.lng, b.lat, b.lng) * CONFIG.detourFactor;
++  return { meters: Math.round(meters), min: Math.ceil(meters / speed + CONFIG.doorMin), sameBuilding: false };
++}
++
++export const mapsUrl = (a, b) =>
++  `https://www.google.com/maps/dir/?api=1&origin=${a.lat},${a.lng}&destination=${b.lat},${b.lng}&travelmode=walking`;
++
++// ---------- time ----------
++/** "12:30", "12:30pm", "1pm", 12.5 -> 12.5 */
++export function parseTime(x) {
++  if (typeof x === "number") return x;
++  const m = String(x).trim().toLowerCase().replace(/\s+/g, "").match(/^(\d{1,2})(?::(\d{2}))?(am|pm|a\.m\.|p\.m\.)?$/);
++  if (!m) throw new Error(`Can't read time "${x}" (try "12:30pm")`);
++  let h = Number(m[1]);
++  const min = Number(m[2] ?? 0), ap = m[3]?.[0];
++  if (h > 23 || min > 59) throw new Error(`Can't read time "${x}"`);
++  if (ap === "p" && h < 12) h += 12;
++  if (ap === "a" && h === 12) h = 0;
++  return h + min / 60;
++}
++
++/** "1" at 12:15 means 1 PM, not 1 AM. */
++export function upcomingTime(x, clock) {
++  const t = parseTime(x);
++  const explicit = typeof x === "number" || /[ap]\.?m/i.test(String(x)) || t >= 12;
++  return !explicit && t < clock.hour && t + 12 > clock.hour ? t + 12 : t;
++}
++
++/** now: Date | ISO string | {day: 0-6, hour: 12.25 | "12:15pm"} | undefined (= real now, Indy time) */
++export function toClock(now) {
++  if (now && typeof now === "object" && !(now instanceof Date) && "day" in now) {
++    const day = Number(now.day);
++    if (!(day >= 0 && day <= 6)) throw new Error("demo day must be 0-6");
++    return { day, hour: parseTime(now.hour) };
++  }
++  const d = now instanceof Date ? now : new Date(now ?? Date.now());
++  const parts = new Intl.DateTimeFormat("en-US", {
++    timeZone: CONFIG.tz, weekday: "short", hour: "numeric", minute: "numeric", hourCycle: "h23"
++  }).formatToParts(d);
++  const get = t => parts.find(p => p.type === t)?.value;
++  return { day: DAYS.indexOf(get("weekday")), hour: Number(get("hour")) + Number(get("minute")) / 60 };
++}
++
++export function addMin({ day, hour }, min) {
++  let h = hour + min / 60, d = day;
++  while (h >= 24) { h -= 24; d = (d + 1) % 7; }
++  return { day: d, hour: h };
++}
++
++export function fmtTime(hour) {
++  const totalMin = Math.round(hour * 60) % (24 * 60);
++  const h24 = Math.floor(totalMin / 60), m = totalMin % 60;
++  return `${((h24 + 11) % 12) + 1}:${String(m).padStart(2, "0")} ${h24 < 12 ? "AM" : "PM"}`;
++}
++export const clockLabel = c => `${DAYS[c.day]} ${fmtTime(c.hour)}`;
++
++export function openStatus(place, clock) {
++  const span = place.hours?.[clock.day];
++  if (!span) return { open: false, reason: `closed on ${DAYS[clock.day]}` };
++  const [o, c] = span;
++  if (clock.hour < o) return { open: false, reason: `opens at ${fmtTime(o)}`, opensAt: fmtTime(o) };
++  if (clock.hour >= c) return { open: false, reason: `closed at ${fmtTime(c)}` };
++  return { open: true, closesAt: c === 24 ? "24/7" : fmtTime(c), minutesLeft: Math.round((c - clock.hour) * 60) };
++}
++
++export function isRushHour(clock) {
++  if (clock.day < 1 || clock.day > 5) return false;
++  return CONFIG.rush.some(r => clock.hour >= r.start && clock.hour < r.end);
++}
++
++function serviceAt(place, clock) {
++  const base = place.serviceMin ?? 5;
++  if (place.kind === "dining" && clock.day >= 1 && clock.day <= 5) {
++    for (const r of CONFIG.rush) if (clock.hour >= r.start && clock.hour < r.end) return { min: Math.ceil(base * r.factor), rush: true };
++  }
++  return { min: base, rush: false };
++}
++
++const isOnTheGo = p => p.kind === "vending" || p.tags?.includes("grab-and-go");
++const tagHit = (p, terms) => terms.filter(t => p.tags?.some(tag => norm(tag).includes(t)) || norm(p.name).includes(t) || p.aliases?.some(a => norm(a) === t));
++
++// ---------- core: one food stop between A and B ----------
++export function evaluateStop(p, { origin, dest, clock, freeMin, eatMin = CONFIG.defaultEatMin, bufferMin = CONFIG.minBufferMin, pace = "walk", grabOnly = false }) {
++  const walkTo = walkInfo(origin, p, pace);
++  const arrive = addMin(clock, walkTo.min);
++  const status = openStatus(p, arrive);
++  const svc = serviceAt(p, arrive);
++  const walkFrom = walkInfo(p, dest, pace);
++  const fixed = walkTo.min + svc.min + walkFrom.min;
++
++  let eat = 0, toGo = true;
++  if (!grabOnly && !isOnTheGo(p)) {
++    const comfy = freeMin - fixed - CONFIG.comfortBufferMin;
++    const tight = freeMin - fixed - bufferMin;
++    const room = comfy >= CONFIG.minEatMin ? comfy : tight;
++    const e = Math.min(eatMin, room);
++    if (e >= CONFIG.minEatMin) { eat = e; toGo = false; }
++  }
++  const total = fixed + eat, buffer = freeMin - total;
++
++  let code = "ok", reason = null;
++  if (!status.open) { code = "closed"; reason = status.reason; }
++  else if (p.kind !== "vending" && status.minutesLeft < CONFIG.lastCallMin) { code = "closing"; reason = `closes at ${status.closesAt}, too close`; }
++  else if (buffer < bufferMin) { code = "no_time"; reason = `needs ${total + bufferMin} min, you have ${freeMin}`; }
++
++  return {
++    id: p.id, name: p.name, kind: p.kind, building: p.building, tags: p.tags ?? [],
++    walkToMin: walkTo.min, serviceMin: svc.min, eatMin: eat, walkFromMin: walkFrom.min,
++    totalMin: total, bufferMin: buffer, toGo, lunchRush: svc.rush,
++    closesAt: status.closesAt ?? null, feasible: code === "ok", code, reason,
++    mapsUrl: mapsUrl(origin, p)
++  };
++}
++
++function freeMinutes({ freeMin, nextClassAt }, clock) {
++  let m = freeMin;
++  if (nextClassAt != null) m = Math.round((upcomingTime(nextClassAt, clock) - clock.hour) * 60);
++  if (typeof m !== "number" || !Number.isFinite(m)) throw new Error("Need freeMin or nextClassAt.");
++  return m;
++}
++
++function mustResolve(ref, label) {
++  const p = typeof ref === "object" && ref?.kind ? ref : resolveBuilding(ref);
++  if (!p) throw new Error(`Couldn't find ${label} "${typeof ref === "object" ? JSON.stringify(ref) : ref}". Known buildings: ${buildingIds().join(", ")}.`);
++  return p;
++}
++
++// ---------- 1) food / coffee ----------
++/** planMeal({ from, to, freeMin | nextClassAt, now, want, avoid, only, eatMin, includeVending }) */
++export function planMeal(opts = {}) {
++  const { from, to, now, eatMin = CONFIG.defaultEatMin, want = [], avoid = [], only = [], includeVending = true } = opts;
++  const origin = mustResolve(from, "starting point");
++  const dest = to != null ? mustResolve(to, "next class") : origin;
++  const clock = toClock(now);
++  const freeMin = freeMinutes(opts, clock);
++
++  const wantT = want.map(norm).filter(Boolean), avoidT = avoid.map(norm).filter(Boolean), onlyT = only.map(norm).filter(Boolean);
++  let pool = includeVending ? FOOD : CAMPUS.dining;
++  if (onlyT.length) pool = pool.filter(p => tagHit(p, onlyT).length);
++
++  const options = [], rejected = [];
++  for (const p of pool) {
++    if (tagHit(p, avoidT).length) { rejected.push({ id: p.id, name: p.name, code: "avoided", reason: "you said to skip this" }); continue; }
++    const e = evaluateStop(p, { origin, dest, clock, freeMin: Math.max(freeMin, 0), eatMin });
++    if (!e.feasible) { rejected.push({ ...e, reason: e.reason }); continue; }
++    const hits = tagHit(p, wantT);
++    const base = p.kind === "vending" ? 30 : p.tags?.includes("grab-and-go") ? 60 : e.toGo ? 70 : 100;
++    options.push({ ...e, matchedWants: hits, score: base + hits.length * 40 + Math.min(e.bufferMin, 10) - (e.lunchRush ? 3 : 0) });
++  }
++  options.sort((a, b) => b.score - a.score || b.bufferMin - a.bufferMin);
++  return { clock, freeMin, origin, dest, options, rejected };
++}
++
++// ---------- 2) study ----------
++export function planStudy(opts = {}) {
++  const { from, to, now } = opts;
++  const origin = mustResolve(from, "starting point");
++  const dest = to != null ? mustResolve(to, "next class") : origin;
++  const clock = toClock(now);
++  const freeMin = freeMinutes(opts, clock);
++
++  const options = [], rejected = [];
++  for (const p of STUDY) {
++    const walkTo = walkInfo(origin, p), walkFrom = walkInfo(p, dest);
++    const arrive = addMin(clock, walkTo.min);
++    const st = openStatus(p, arrive);
++    const settle = p.serviceMin ?? 2;
++    let studyMin = freeMin - walkTo.min - settle - walkFrom.min - CONFIG.studyBufferMin;
++    if (st.open) studyMin = Math.min(studyMin, st.minutesLeft - settle);
++    const base = { id: p.id, name: p.name, kind: p.kind, building: p.building, tags: p.tags ?? [], closesAt: st.closesAt ?? null, mapsUrl: mapsUrl(origin, p) };
++    if (!st.open) { rejected.push({ ...base, code: "closed", reason: st.reason }); continue; }
++    if (studyMin < CONFIG.minStudyMin) {
++      rejected.push({ ...base, code: "no_time", reason: `only ${Math.max(studyMin, 0)} min of study time, not worth the walk` }); continue;
++    }
++    const stopMin = settle + studyMin, total = walkTo.min + stopMin + walkFrom.min;
++    options.push({
++      ...base, walkToMin: walkTo.min, serviceMin: settle, studyMin, stopMin, walkFromMin: walkFrom.min,
++      totalMin: total, bufferMin: freeMin - total, feasible: true,
++      score: studyMin + (p.tags?.includes("quiet") ? 3 : 0)
++    });
++  }
++  options.sort((a, b) => b.score - a.score);
++  return { clock, freeMin, origin, dest, options, rejected };
++}
++
++// ---------- 3) getting somewhere ----------
++export function rushRoute(opts = {}) {
++  const { from, to, now } = opts;
++  const origin = mustResolve(from, "starting point");
++  const dest = mustResolve(to, "destination");
++  const clock = toClock(now);
++  const minutesLeft = opts.minutesLeft != null || opts.arriveBy != null
++    ? freeMinutes({ freeMin: opts.minutesLeft, nextClassAt: opts.arriveBy }, clock) : null;
++
++  const walk = walkInfo(origin, dest, "walk"), brisk = walkInfo(origin, dest, "brisk"), jog = walkInfo(origin, dest, "jog");
++  let verdict = "walk", pace = "walk", minutes = walk.min, lateByMin = 0;
++  if (minutesLeft != null && walk.min > minutesLeft) {
++    if (brisk.min <= minutesLeft) { verdict = "speed-walk"; pace = "brisk"; minutes = brisk.min; }
++    else if (jog.min <= minutesLeft) { verdict = "jog"; pace = "jog"; minutes = jog.min; }
++    else { verdict = "late"; pace = "brisk"; minutes = brisk.min; lateByMin = brisk.min - minutesLeft; }
++  }
++  return {
++    clock, origin, dest, minutesLeft, meters: walk.meters,
++    walkMin: walk.min, briskMin: brisk.min, jogMin: jog.min,
++    verdict, pace, minutes, lateByMin, mapsUrl: mapsUrl(origin, dest)
++  };
++}
++
++// ---------- 4) "I'm screwed": compare every choice against the deadline ----------
++export function panicPlan(opts = {}) {
++  const { from, to, now, hungry = true, want = [] } = opts;
++  const origin = mustResolve(from, "starting point");
++  const dest = mustResolve(to ?? from, "next class");
++  const clock = toClock(now);
++  const freeMin = freeMinutes(opts, clock);
++  const route = rushRoute({ from: origin, to: dest, now: clock.day != null ? { day: clock.day, hour: clock.hour } : now });
++  const destName = dest.kind === "point" ? "class" : displayName(dest);
++
++  const options = [];
++  const push = o => options.push({ ...o, delta: freeMin - o.minutes, makesIt: freeMin - o.minutes >= 0 });
++
++  push({
++    kind: "direct", label: "Go directly to class", minutes: route.walkMin,
++    detail: `${route.walkMin} min walk`, steps: [{ type: "walk", label: `Walk to ${destName}`, minutes: route.walkMin }]
++  });
++  if (route.briskMin < route.walkMin) push({
++    kind: "hustle", label: "Speed-walk to class", minutes: route.briskMin,
++    detail: `${route.briskMin} min fast walk`, steps: [{ type: "walk", label: `Speed-walk to ${destName}`, minutes: route.briskMin }]
++  });
++
++  if (hungry) {
++    const direct = haversineM(origin.lat, origin.lng, dest.lat, dest.lng);
++    const snacks = FOOD.filter(isOnTheGo).map(p => {
++      const e = evaluateStop(p, { origin, dest, clock, freeMin, pace: "brisk", grabOnly: true, bufferMin: 0 });
++      const via = haversineM(origin.lat, origin.lng, p.lat, p.lng) + haversineM(p.lat, p.lng, dest.lat, dest.lng);
++      const onRoute = buildingOf(p) === buildingOf(origin) || buildingOf(p) === buildingOf(dest) || via <= Math.max(direct, 50) * CONFIG.corridorFactor;
++      return { p, e, onRoute };
++    }).filter(x => x.e.code !== "closed" && x.e.code !== "closing" && x.onRoute)
++      .sort((a, b) => a.e.totalMin - b.e.totalMin).slice(0, 2);
++
++    for (const { p, e } of snacks) push({
++      kind: p.kind === "vending" ? "vending" : "grab", id: p.id, location: displayName(p),
++      label: p.kind === "vending" ? `Speed-walk + snack from ${displayName(p)}` : `Speed-walk + grab from ${displayName(p)}`,
++      minutes: e.totalMin,
++      detail: `${e.walkToMin} min walk + ${e.serviceMin} min grab + ${e.walkFromMin} min to class`,
++      steps: [
++        { type: "walk", label: `Walk to ${displayName(p)}`, minutes: e.walkToMin },
++        { type: "food", kind: p.kind, label: p.kind === "vending" ? "Grab a snack from the machine" : "Grab it to go", minutes: e.serviceMin },
++        { type: "walk", label: `Walk to ${destName}`, minutes: e.walkFromMin }
++      ]
++    });
++
++    const meals = CAMPUS.dining.filter(p => !isOnTheGo(p))
++      .map(p => evaluateStop(p, { origin, dest, clock, freeMin: 999, eatMin: CONFIG.defaultEatMin }))
++      .filter(e => e.code !== "closed" && e.code !== "closing")
++      .sort((a, b) => (tagHit(getPlace(b.id), want.map(norm)).length - tagHit(getPlace(a.id), want.map(norm)).length) || a.totalMin - b.totalMin)
++      .slice(0, 2);
++    for (const e of meals) {
++      const eat = e.serviceMin + CONFIG.defaultEatMin;
++      const minutes = e.walkToMin + eat + e.walkFromMin;
++      push({
++        kind: "meal", id: e.id, location: shortName(getPlace(e.id)), label: shortName(getPlace(e.id)), minutes,
++        detail: `${e.walkToMin} min walk + ${eat} min eating + ${e.walkFromMin} min to class`,
++        steps: [
++          { type: "walk", label: `Walk to ${shortName(getPlace(e.id))}`, minutes: e.walkToMin },
++          { type: "food", kind: "dining", label: "Grab a bite", minutes: eat },
++          { type: "walk", label: `Walk to ${destName}`, minutes: e.walkFromMin }
++        ]
++      });
++    }
++  }
++
++  for (const o of options) {
++    if (!o.makesIt && (o.kind === "vending" || o.kind === "grab" || o.kind === "meal") && o.delta >= -2) {
++      o.note = `Only worth it if you can be ${-o.delta} min late.`;
++    } else if (o.makesIt) {
++      o.note = o.delta === 0 ? "Zero slack. Don't stop for anything." : `${o.delta} min to spare.`;
++    } else {
++      o.note = `${-o.delta} min late.`;
++    }
++  }
++
++  // Pick: food that makes it (if hungry) > direct > hustle > least late.
++  const fits = options.filter(o => o.makesIt);
++  const foodFit = hungry ? fits.filter(o => o.kind !== "direct" && o.kind !== "hustle").sort((a, b) => b.delta - a.delta)[0] : null;
++  const moveFit = fits.find(o => o.kind === "direct") ?? fits.find(o => o.kind === "hustle");
++  const pick = foodFit ?? moveFit ?? [...options].sort((a, b) => b.delta - a.delta)[0];
++  options.forEach(o => { o.recommended = o === pick; });
++
++  let yourMove;
++  if (!pick.makesIt) yourMove = { title: `GO NOW. YOU'LL BE ~${-pick.delta} MIN LATE`, detail: "Send your professor a quick heads-up and skip every stop." };
++  else if (pick.kind === "vending") yourMove = { title: `HIT ${pick.location.toUpperCase()} ON THE WAY`, detail: `It's on your route and you still arrive with ${pick.delta} min to spare.` };
++  else if (pick.kind === "grab") yourMove = { title: `GRAB ${pick.location.toUpperCase()} TO GO`, detail: `It's on your route and you still arrive with ${pick.delta} min to spare.` };
++  else if (pick.kind === "meal") yourMove = { title: `EAT AT ${pick.location.toUpperCase()}`, detail: `You actually have time. ${pick.delta} min to spare.` };
++  else if (pick.kind === "hustle") yourMove = { title: "SPEED-WALK TO CLASS", detail: hungry ? "No time for food. Eat after class." : "Leave now and keep moving." };
++  else yourMove = { title: "HEAD STRAIGHT TO CLASS", detail: hungry ? "Food won't fit. Eat after class." : `You'll have ${pick.delta} min to spare.` };
++
++  options.sort((a, b) => Number(b.recommended) - Number(a.recommended) || b.delta - a.delta);
++  return { clock, freeMin, origin, dest, options, pick, yourMove, mapsUrl: route.mapsUrl };
++}
++
++// ---------- directory + live campus status ----------
++export function directory(now) {
++  const clock = toClock(now);
++  const typeOf = p => p.kind === "building" ? "academic"
++    : p.kind === "study" ? "study"
++    : p.tags?.some(t => ["coffee", "tea", "espresso"].includes(t)) ? "coffee" : "food";
++  return ALL.map(p => {
++    const st = p.hours ? openStatus(p, clock) : null;
++    const span = p.hours?.[clock.day];
++    return {
++      id: p.id, name: shortName(p), fullName: p.name, abbreviation: p.kind === "building" ? p.id : undefined,
++      type: typeOf(p), kind: p.kind, building: p.building ?? null,
++      residence: p.kind === "building" && ["NH", "UT"].includes(p.id),
++      openNow: st ? st.open : null,
++      status: st ? (st.open ? (st.closesAt === "24/7" ? "Open 24/7" : `Open until ${st.closesAt}`) : st.reason) : null,
++      hoursToday: p.hours ? (span ? (span[0] === 0 && span[1] === 24 ? "24/7" : `${fmtTime(span[0])} – ${fmtTime(span[1])}`) : "Closed today") : null,
++      tags: p.tags ?? [], verified: p.kind === "building" ? p.verified !== false : undefined
++    };
++  });
++}
++
++export function campusStatus(now) {
++  const clock = toClock(now);
++  const openDining = CAMPUS.dining.filter(p => openStatus(p, clock).open).length;
++  const openStudy = STUDY.filter(p => openStatus(p, clock).open).length;
++  const rush = isRushHour(clock);
++  return [
++    { label: "Dining", value: openDining ? `${openDining} of ${CAMPUS.dining.length} open` : "All closed", busy: openDining === 0 },
++    { label: "Lines", value: rush ? "Busy" : "Normal", busy: rush },
++    { label: "Vending", value: `${CAMPUS.vending.length} machines`, busy: false },
++    { label: "Study spaces", value: openStudy ? `${openStudy} open` : "Closed", busy: openStudy === 0 }
++  ];
++}
++
++// ---------- data validator (run before the demo) ----------
++export function validateCampus() {
++  const errors = [], warnings = [];
++  const seen = new Map();
++  const ids = new Set(CAMPUS.buildings.map(b => b.id));
++  const inBounds = (lat, lng) => lat > 39.765 && lat < 39.785 && lng > -86.185 && lng < -86.160;
++
++  for (const [arr, list] of Object.entries(CAMPUS)) {
++    for (const p of list) {
++      const tag = `${arr}/${p.id}`;
++      if (seen.has(p.id)) errors.push(`${tag}: id also used in ${seen.get(p.id)}`);
++      seen.set(p.id, arr);
++      if (!p.lat || !p.lng) errors.push(`${tag}: lat/lng missing or 0`);
++      else if (!inBounds(p.lat, p.lng)) errors.push(`${tag}: coordinates are off campus (${p.lat}, ${p.lng})`);
++      if (p.verified === false) warnings.push(`${tag}: coordinates are ESTIMATED`);
++      if (arr === "buildings") continue;
++
++      if (p.building && !ids.has(p.building)) errors.push(`${tag}: building "${p.building}" doesn't exist`);
++      else if (p.building) {
++        const b = CAMPUS.buildings.find(x => x.id === p.building);
++        if (b.lat !== p.lat || b.lng !== p.lng) warnings.push(`${tag}: coordinates differ from its building ${p.building} (fine if intentional)`);
++      }
++      if (!(p.serviceMin > 0)) errors.push(`${tag}: serviceMin must be > 0`);
++      for (let d = 0; d <= 6; d++) {
++        const span = p.hours?.[d];
++        if (span === undefined) { errors.push(`${tag}: hours missing day ${d} (use null for closed)`); continue; }
++        if (span === null) continue;
++        const [o, c] = span;
++        if (!(o >= 0 && c <= 24 && o < c)) errors.push(`${tag}: bad hours on day ${d}: [${span}]`);
++        if (arr === "vending" && (o !== 0 || c !== 24)) errors.push(`${tag}: vending must be [0, 24] every day`);
++      }
++    }
++  }
++  const owner = new Map();
++  for (const p of ALL) for (const a of p.aliases ?? []) {
++    const k = norm(a);
++    if (owner.has(k) && owner.get(k) !== p.id) warnings.push(`alias "${a}" used by both ${owner.get(k)} and ${p.id}`);
++    else owner.set(k, p.id);
++  }
++  return { ok: errors.length === 0, errors, warnings };
++}
+diff --git a/backend/src/survive.js b/backend/src/survive.js
+new file mode 100644
+index 0000000..90b885b
+--- /dev/null
++++ b/backend/src/survive.js
+@@ -0,0 +1,289 @@
++// ============================================================
++// survive.js — the one function behind POST /api/survive.
++//   1. intent.js   : sentence -> structured intent (Gemini, rules fallback)
++//   2. planner.js  : all math (walks, lines, hours, buffers)
++//   3. narrate.js  : Gemini writes over the computed numbers
++// Output = the frontend's SurvivalRecommendation, plus extra fields that
++// replace the UI's hardcoded route card, alternatives, and panic panel.
++// ============================================================
++import {
++  planMeal, planStudy, rushRoute, panicPlan, getPlace, resolvePlace, whereAmI, displayName,
++  toClock, clockLabel, upcomingTime, campusStatus, mapsUrl
++} from "./planner.js";
++import { parseIntent } from "./intent.js";
++import { narrate } from "./narrate.js";
++import { riskOf, checkResponse } from "./contract.js";
++
++export class NeedsInfoError extends Error {
++  constructor(message, needs) { super(message); this.name = "NeedsInfoError"; this.needs = needs; this.status = 422; }
++}
++
++const DEFAULT_MINUTES = { food: 30, coffee: 20, study: 45, travel: 15 };
++const COFFEE_TAGS = ["coffee", "tea", "espresso"];
++const nrm = s => String(s).toLowerCase().replace(/[^a-z0-9 ]/g, " ").replace(/\s+/g, " ").trim();
++
++const label = p => (p.kind === "point" ? (p.building ? displayName(getPlace(p.building)) : "your location") : displayName(p));
++const placeRef = p => ({ id: p.id, name: p.name, short: label(p), lat: p.lat, lng: p.lng });
++const stopRef = (id, extra = {}) => {
++  const p = getPlace(id);
++  return { id: p.id, name: displayName(p), fullName: p.name, kind: p.kind, building: p.building ?? null, tags: p.tags ?? [], ...extra };
++};
++const wantHit = (id, wants) => {
++  const p = getPlace(id);
++  const hay = nrm([p.name, ...(p.tags ?? []), ...(p.aliases ?? [])].join(" "));
++  return wants.some(w => nrm(w) && hay.includes(nrm(w)));
++};
++const badgeFor = (r, isVending) => r.risk === "screwed" ? "TOO RISKY" : r.risk === "tight" ? "TIGHT" : isVending ? "QUICK SNACK" : "GOOD OPTION";
++
++/** Builds a contract-valid recommendation: total = sum(steps), buffer = available - total, risk from buffer. */
++function build({ location, steps, available, mode, stop = null, reason = [], extra = {} }) {
++  const s = steps.map(x => ({ ...x, minutes: Math.max(0, Math.round(x.minutes)) }));
++  const total = s.reduce((a, x) => a + x.minutes, 0);
++  const buffer = available - total;
++  return { location, totalMinutes: total, bufferMinutes: buffer, risk: riskOf(buffer), reason: reason.filter(Boolean), steps: s, mode, availableMinutes: available, stop, ...extra };
++}
++
++function mealSteps(o, destLabel, goal) {
++  const p = getPlace(o.id);
++  const isCoffee = goal === "coffee" && p.tags?.some(t => COFFEE_TAGS.includes(t));
++  const stopLabel = p.kind === "vending" ? (goal === "coffee" ? "Grab a drink from the machine" : "Grab a snack from the machine")
++    : isCoffee ? "Grab your coffee" : o.toGo ? "Grab it to go" : "Grab a bite";
++  return [
++    { type: "walk", label: `Walk to ${displayName(p)}`, minutes: o.walkToMin },
++    { type: "food", kind: p.kind === "vending" ? "vending" : isCoffee ? "coffee" : "food", label: stopLabel, minutes: o.serviceMin + o.eatMin },
++    { type: "walk", label: `Walk ${destLabel}`, minutes: o.walkFromMin }
++  ];
++}
++const stepDetail = steps => steps.length === 3
++  ? `${steps[0].minutes} min walk · ${steps[1].minutes} min stop · ${steps[2].minutes} min to class`
++  : `${steps[0].minutes} min ${steps[0].label.toLowerCase().startsWith("speed") ? "fast walk" : "walk"}`;
++
++// ---------- resolve who/where/how long ----------
++function resolveContext(intent, location, clock, assumptions) {
++  let origin = intent.origin ? getPlace(intent.origin) : null;
++  if (!origin && location) {
++    const ok = Number.isFinite(location.lat) && Number.isFinite(location.lng);
++    if (ok && whereAmI(location.lat, location.lng).onCampus) origin = resolvePlace({ lat: location.lat, lng: location.lng });
++    else if (ok) assumptions.push("Your GPS puts you off campus, so it wasn't used.");
++  }
++  if (!origin) {
++    origin = getPlace(process.env.DEFAULT_ORIGIN || "SL");
++    assumptions.push(`Couldn't tell where you are, so I assumed ${label(origin)}. Name your building for an exact plan.`);
++  }
++
++  let dest = intent.destination ? getPlace(intent.destination) : null;
++  if (dest && dest.id === origin.id) dest = origin;
++  if (!dest) {
++    if (intent.goal === "travel") {
++      throw new NeedsInfoError(`Which building is your class in? Try: "I have 10 minutes to get from ${label(origin)} to ET."`, ["destination"]);
++    }
++    dest = origin;
++    assumptions.push(`Assumed your next class is back in ${label(origin)}.`);
++  }
++
++  let available = intent.minutesAvailable;
++  if (available == null && intent.classTime) {
++    try { available = Math.round((upcomingTime(intent.classTime, clock) - clock.hour) * 60); } catch { available = null; }
++    if (available != null && available <= 0) throw new NeedsInfoError(`Your ${intent.classTime} class has already started. Tell me how many minutes you have.`, ["minutesAvailable"]);
++  }
++  if (available == null) {
++    available = DEFAULT_MINUTES[intent.goal];
++    assumptions.push(`Assumed you have ${available} minutes. Say how long you have for an exact plan.`);
++  }
++  if (available > 240) { available = 240; assumptions.push("Capped the plan at 4 hours."); }
++  return { origin, dest, available };
++}
++
++// ---------- modes ----------
++function mealMode({ intent, origin, dest, available, now, assumptions }) {
++  const destLabel = dest === origin ? `back to ${label(dest)}` : `to ${label(dest)}`;
++  const only = intent.goal === "coffee" ? COFFEE_TAGS : [];
++  let plan = planMeal({ from: origin, to: dest, freeMin: available, now, want: intent.wants, avoid: intent.avoids, only });
++  if (intent.goal === "coffee" && !plan.options.length) {
++    const drinks = planMeal({ from: origin, to: dest, freeMin: available, now, avoid: intent.avoids, only: ["drinks"] });
++    if (drinks.options.length) {
++      assumptions.push("No coffee spot fits in time, so here's the fastest drink instead.");
++      plan = { ...drinks, rejected: [...plan.rejected, ...drinks.rejected.filter(r => !plan.rejected.some(x => x.id === r.id))] };
++    }
++  }
++  const best = plan.options[0];
++  if (!best || (intent.urgent && best.bufferMin < 4)) return null; // -> panic mode
++
++  const rejected = plan.rejected;
++  const checked = plan.options.length + rejected.length;
++  const closed = rejected.filter(r => r.code === "closed").length;
++  const skip = rejected.find(r => r.code !== "closed" && wantHit(r.id, intent.wants)) ?? rejected.find(r => r.code === "no_time");
++  const p = getPlace(best.id);
++
++  const main = build({
++    location: displayName(p), steps: mealSteps(best, destLabel, intent.goal), available, mode: intent.goal,
++    stop: stopRef(best.id, { closesAt: best.closesAt, lunchRush: best.lunchRush, toGo: best.toGo }),
++    reason: [
++      null, // filled below once the buffer is known
++      p.kind === "vending" ? "Vending machines never close" : best.closesAt ? `${displayName(p)} is open until ${best.closesAt}` : null,
++      best.lunchRush ? `Lunch rush: line time estimated at ${best.serviceMin} min` : null,
++      best.toGo && p.kind !== "vending" ? "Not enough time to sit down, so take it to go" : null,
++      best.matchedWants?.length ? `Matches what you asked for (${best.matchedWants.join(", ")})` : null,
++      skip ? `Skipped ${displayName(getPlace(skip.id))}: ${skip.reason}` : null,
++      `Checked ${checked} places: ${checked - closed} open, ${plan.options.length} fit your time`
++    ]
++  });
++  main.reason.unshift(main.bufferMinutes >= 0
++    ? `Fits your ${available}-minute window with ${main.bufferMinutes} min to spare`
++    : `Runs ${-main.bufferMinutes} min past your ${available}-minute window`);
++
++  const altSources = [...plan.options.slice(1, 4), ...rejected.filter(r => r.code === "no_time" && Number.isFinite(r.totalMin))].slice(0, 3);
++  const alternatives = altSources.map(o => {
++    const q = getPlace(o.id);
++    const r = build({
++      location: displayName(q), steps: mealSteps(o, destLabel, intent.goal), available, mode: intent.goal,
++      stop: stopRef(o.id, { closesAt: o.closesAt, lunchRush: o.lunchRush, toGo: o.toGo }),
++      reason: [o.feasible ? `Fits with ${o.bufferMin} min to spare` : `Won't fit: ${o.reason}`, o.closesAt && q.kind !== "vending" ? `Open until ${o.closesAt}` : null]
++    });
++    return { ...r, title: displayName(q), badge: badgeFor(r, q.kind === "vending"), detail: stepDetail(r.steps) };
++  });
++
++  return {
++    main, alternatives, panic: null,
++    rejected: rejected.map(r => ({ id: r.id, location: displayName(getPlace(r.id)), code: r.code, reason: r.reason })),
++    mapsTo: p
++  };
++}
++
++function panicMode({ intent, origin, dest, available, now, hungry }) {
++  const pp = panicPlan({ from: origin, to: dest, freeMin: available, now, hungry, want: intent.wants });
++  const direct = pp.options.find(o => o.kind === "direct");
++  const meals = pp.options.filter(o => o.kind === "meal");
++  const destName = label(dest);
++  const toRec = (o, reason) => build({
++    location: o.location ?? destName, steps: o.steps, available, mode: "panic",
++    stop: o.id ? stopRef(o.id) : null, reason
++  });
++
++  const main = toRec(pp.pick, [
++    `You have ${available} min. Walking straight to ${destName} takes ${direct.minutes} min`,
++    hungry && meals.length ? `A sit-down meal needs at least ${Math.min(...meals.map(m => m.minutes))} min` : null,
++    pp.pick.note,
++    `${pp.options.filter(o => o.makesIt).length} of ${pp.options.length} options get you there on time`
++  ]);
++  const alternatives = pp.options.filter(o => !o.recommended).slice(0, 3).map(o => {
++    const r = toRec(o, [o.note]);
++    return { ...r, title: o.label, badge: badgeFor(r, o.kind === "vending"), detail: o.detail };
++  });
++  return {
++    main, alternatives, rejected: [],
++    panic: {
++      availableMinutes: available, yourMove: pp.yourMove,
++      options: pp.options.map(o => ({
++        label: o.label, detail: o.detail, minutes: o.minutes, delta: o.delta, makesIt: o.makesIt,
++        recommended: o.recommended, note: o.note, kind: o.kind, location: o.location ?? destName, steps: o.steps
++      }))
++    },
++    mapsTo: pp.pick.id ? getPlace(pp.pick.id) : dest
++  };
++}
++
++function travelMode({ intent, origin, dest, available, now }) {
++  const rr = rushRoute({ from: origin, to: dest, minutesLeft: available, now });
++  const verb = rr.pace === "walk" ? "Walk" : rr.pace === "jog" ? "Jog" : "Speed-walk";
++  const main = build({
++    location: label(dest), available, mode: "travel",
++    steps: [{ type: "walk", label: `${verb} to ${label(dest)}`, minutes: rr.minutes }],
++    reason: [
++      rr.meters ? `About ${rr.meters} m on foot: ${rr.walkMin} min at a normal pace` : `You're already in ${label(dest)}`,
++      rr.pace !== "walk" ? `Speed-walking cuts it to ${rr.briskMin} min` : null,
++      rr.verdict === "late" ? `Even speed-walking, you'll be about ${rr.lateByMin} min late. Go now.` : null
++    ]
++  });
++  main.reason.push(main.bufferMinutes >= 0 ? `Leaves ${main.bufferMinutes} min to spare` : "Send your professor a heads-up");
++
++  let panic = null, alternatives = [];
++  if (intent.urgent || main.bufferMinutes < 4) {
++    const pm = panicMode({ intent, origin, dest, available, now, hungry: false });
++    panic = pm.panic;
++    alternatives = pm.alternatives.filter(a => a.totalMinutes !== main.totalMinutes || a.steps[0].label !== main.steps[0].label);
++  }
++  return { main, alternatives, panic, rejected: [], mapsTo: dest };
++}
++
++function studyMode({ origin, dest, available, now }) {
++  const destLabel = dest === origin ? `back to ${label(dest)}` : `to ${label(dest)}`;
++  const sp = planStudy({ from: origin, to: dest, freeMin: available, now });
++  const rejected = sp.rejected.map(r => ({ id: r.id, location: displayName(getPlace(r.id)), code: r.code, reason: r.reason }));
++  const toRec = o => build({
++    location: displayName(getPlace(o.id)), available, mode: "study",
++    stop: stopRef(o.id, { closesAt: o.closesAt }),
++    steps: [
++      { type: "walk", label: `Walk to ${displayName(getPlace(o.id))}`, minutes: o.walkToMin },
++      { type: "food", kind: "study", label: "Settle in and study", minutes: o.stopMin },
++      { type: "walk", label: `Walk ${destLabel}`, minutes: o.walkFromMin }
++    ],
++    reason: [
++      `${o.studyMin} min of actual study time`,
++      o.closesAt ? `${displayName(getPlace(o.id))} is open until ${o.closesAt}` : null,
++      o.tags.includes("quiet") ? "Quiet study space" : o.tags.includes("food nearby") ? "Food is steps away if you get hungry" : null
++    ]
++  });
++
++  if (!sp.options.length) {
++    const rr = rushRoute({ from: origin, to: dest, now });
++    const main = build({
++      location: label(dest), available, mode: "study",
++      steps: [{ type: "walk", label: `Walk ${destLabel}`, minutes: rr.walkMin }],
++      reason: [`No study spot gives you at least 10 minutes right now`, ...rejected.map(r => `${r.location}: ${r.reason}`)]
++    });
++    return { main, alternatives: [], panic: null, rejected, mapsTo: dest };
++  }
++  const main = toRec(sp.options[0]);
++  const second = sp.options[1];
++  if (second) main.reason.push(`${displayName(getPlace(second.id))} would give you ${second.studyMin} min`);
++  const alternatives = sp.options.slice(1).map(o => { const r = toRec(o); return { ...r, title: r.location, badge: badgeFor(r, false), detail: stepDetail(r.steps) }; });
++  return { main, alternatives, panic: null, rejected, mapsTo: getPlace(sp.options[0].id) };
++}
++
++// ---------- entry point ----------
++/**
++ * survive({ query, location?, now?, apiKey?, fetchImpl?, skipAI? })
++ *   location: {lat, lng} from the browser, optional
++ *   now:      {day: 0-6, hour: "12:15pm"} to freeze time for a demo, optional
++ */
++export async function survive({ query, location = null, now, apiKey, fetchImpl, skipAI = false } = {}) {
++  if (typeof query !== "string" || !query.trim()) throw new NeedsInfoError("Tell me your situation, like \"I have 30 minutes in SL and I'm hungry.\"", ["query"]);
++  if (query.length > 500) throw new NeedsInfoError("That's a long one. Keep it under 500 characters.", ["query"]);
++
++  const clock = toClock(now);
++  const frozen = { day: clock.day, hour: clock.hour };   // one clock for every calculation in this request
++  const { intent, source, error } = await parseIntent(query, { clock, apiKey, fetchImpl, skipAI });
++  const assumptions = [];
++  const { origin, dest, available } = resolveContext(intent, location, clock, assumptions);
++  const ctx = { intent, origin, dest, available, now: frozen, assumptions };
++
++  let out;
++  if (intent.goal === "travel") out = travelMode(ctx);
++  else if (intent.goal === "study") out = studyMode(ctx);
++  else out = mealMode(ctx) ?? panicMode({ ...ctx, hungry: true });
++
++  const response = {
++    ...out.main,
++    origin: placeRef(origin),
++    destination: placeRef(dest),
++    narration: "",
++    alternatives: out.alternatives,
++    rejected: out.rejected,
++    panic: out.panic,
++    campusStatus: campusStatus(frozen),
++    mapsUrl: mapsUrl(origin, out.mapsTo),
++    assumptions,
++    intent,
++    computedAt: clockLabel(clock),
++    ai: null
++  };
++
++  const n = await narrate(response, { query, apiKey, fetchImpl, skipAI });
++  response.narration = n.text;
++  response.ai = { intent: source, narration: n.source, errors: [error, n.error].filter(Boolean) };
++
++  const problems = checkResponse(response);
++  if (problems.length) throw new Error(`Response failed the frontend contract: ${problems.join("; ")}`);
++  return response;
++}
+diff --git a/backend/test/http.test.js b/backend/test/http.test.js
+new file mode 100644
+index 0000000..fe35b38
+--- /dev/null
++++ b/backend/test/http.test.js
+@@ -0,0 +1,53 @@
++import { test, before, after } from "node:test";
++import assert from "node:assert/strict";
++import { createApp } from "../src/app.js";
++import { checkResponse } from "../src/contract.js";
++
++let server, base;
++before(async () => {
++  server = createApp({ apiKey: "", demoNow: { day: 3, hour: "12:15pm" } });
++  await new Promise(r => server.listen(0, r));
++  base = `http://127.0.0.1:${server.address().port}`;
++});
++after(() => new Promise(r => server.close(r)));
++
++const post = (path, body) => fetch(base + path, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(body) });
++
++test("GET /api/health", async () => {
++  const r = await (await fetch(base + "/api/health")).json();
++  assert.equal(r.ok, true);
++  assert.equal(r.demoMode, true);
++  assert.equal(r.data.valid, true);
++});
++
++test("POST /api/survive returns a contract-valid plan", async () => {
++  const res = await post("/api/survive", { query: "I have 30 min between CS 180 in SL and my next class in ET and I'm hungry" });
++  assert.equal(res.status, 200);
++  const r = await res.json();
++  assert.deepEqual(checkResponse(r), []);
++  assert.equal(res.headers.get("access-control-allow-origin"), "*");
++});
++
++test("POST /api/survive with GPS", async () => {
++  const r = await (await post("/api/survive", { query: "hungry, 25 min", location: { lat: 39.7762, lng: -86.1728 } })).json();
++  assert.equal(r.origin.short, "North Hall");
++});
++
++test("needs-info -> 422 with a helpful message", async () => {
++  const res = await post("/api/survive", { query: "I have 10 minutes to get to class." });
++  assert.equal(res.status, 422);
++  assert.match((await res.json()).error, /Which building/);
++});
++
++test("bad JSON -> 400, unknown route -> 404, CORS preflight -> 204", async () => {
++  assert.equal((await fetch(base + "/api/survive", { method: "POST", body: "{nope" })).status, 400);
++  assert.equal((await fetch(base + "/nope")).status, 404);
++  assert.equal((await fetch(base + "/api/survive", { method: "OPTIONS" })).status, 204);
++});
++
++test("GET /api/places and /api/status", async () => {
++  const places = await (await fetch(base + "/api/places")).json();
++  assert.ok(places.length >= 20 && places.every(p => p.id && p.name && p.type));
++  const status = await (await fetch(base + "/api/status")).json();
++  assert.equal(status.length, 4);
++});
+diff --git a/backend/test/intent.test.js b/backend/test/intent.test.js
+new file mode 100644
+index 0000000..fd886d5
+--- /dev/null
++++ b/backend/test/intent.test.js
+@@ -0,0 +1,37 @@
++import { test } from "node:test";
++import assert from "node:assert/strict";
++import { fallbackIntent, sanitizeIntent } from "../src/intent.js";
++
++const cases = [
++  ["I have 30 min between CS 180 in SL 112 and my next class in ET, want chick-fil-a but no pizza", { origin: "SL", destination: "ET", minutesAvailable: 30, goal: "food" }],
++  ["I have 8 minutes to get from the library to SL.", { origin: "UL", destination: "SL", minutesAvailable: 8, goal: "travel" }],
++  ["help im so screwed, 4 min to get from campus center to innovation hall", { origin: "CE", destination: "IO", urgent: true, goal: "travel" }],
++  ["im in north hall and my class is at 1 in sl, starving", { origin: "NH", destination: "SL", classTime: "1", goal: "food" }],
++  ["leaving tower in half an hour for ET, need a quiet spot to study", { origin: "UT", destination: "ET", minutesAvailable: 30, goal: "study" }],
++  ["can I get tower dining before my 12:45 class in ET? im in SL", { origin: "SL", destination: "ET", classTime: "12:45", goal: "food" }],
++  ["I have 22 minutes to find coffee.", { minutesAvailable: 22, goal: "coffee" }],
++  ["I have 25 minutes between my classes and I'm hungry. I'm at University Hall and my next class is at Innovation Hall.", { origin: null, destination: "IO", goal: "food" }]
++];
++
++for (const [q, expected] of cases) {
++  test(`rules: ${q.slice(0, 50)}`, () => {
++    const i = fallbackIntent(q);
++    for (const [k, v] of Object.entries(expected)) assert.deepEqual(i[k], v, k);
++  });
++}
++
++test("wants and avoids", () => {
++  const i = fallbackIntent("30 min in SL, want chick-fil-a but no pizza");
++  assert.ok(i.wants.includes("chick fil a"));
++  assert.ok(i.avoids.includes("pizza"));
++});
++
++test("Gemini output is sanitized: bad ids dropped, food places become wants", () => {
++  const i = sanitizeIntent({ origin: "University Hall", destination: "TD", minutesAvailable: 9999, goal: "dance", urgent: "yes", wants: [1, "Pizza"], avoids: null, usesCurrentLocation: true });
++  assert.equal(i.origin, null);
++  assert.equal(i.destination, null);
++  assert.ok(i.wants.includes("tower dining") && i.wants.includes("pizza"));
++  assert.equal(i.minutesAvailable, null);
++  assert.equal(i.goal, "food");
++  assert.equal(i.urgent, false);
++});
+diff --git a/backend/test/planner.test.js b/backend/test/planner.test.js
+new file mode 100644
+index 0000000..8c36fba
+--- /dev/null
++++ b/backend/test/planner.test.js
+@@ -0,0 +1,67 @@
++import { test } from "node:test";
++import assert from "node:assert/strict";
++import * as P from "../src/planner.js";
++
++const W = { day: 3, hour: "12:15pm" };
++
++test("campus data passes every rule", () => {
++  const v = P.validateCampus();
++  assert.deepEqual(v.errors, []);
++});
++
++test("rooms, aliases and codes resolve", () => {
++  for (const [q, id] of [["SL 112", "SL"], ["ET215", "ET"], ["tower", "UT"], ["tower dining", "TD"], ["library", "UL"], ["north hall", "NH"]])
++    assert.equal(P.resolvePlace(q)?.id, id, q);
++  assert.equal(P.resolveBuilding("tower dining").id, "UT");
++});
++
++test("times: '1' at 12:15 means 1 PM", () => {
++  assert.equal(P.upcomingTime("1", { day: 3, hour: 12.25 }), 13);
++  assert.equal(P.parseTime("12:45pm"), 12.75);
++  assert.throws(() => P.parseTime("25:00"));
++});
++
++test("30 min SL -> ET at lunch: Tower Dining sit-down with a real buffer", () => {
++  const m = P.planMeal({ from: "SL", to: "ET", freeMin: 30, now: W });
++  assert.equal(m.options[0].id, "TD");
++  assert.ok(m.options[0].bufferMin >= 4);
++  assert.equal(m.options[0].eatMin > 0, true);
++});
++
++test("closed places are rejected with a reason", () => {
++  const m = P.planMeal({ from: "SL", freeMin: 20, now: { day: 3, hour: "11:30pm" } });
++  assert.ok(m.options.every(o => o.kind === "vending"));
++  assert.ok(m.rejected.some(r => r.id === "TD" && r.code === "closed"));
++});
++
++test("study: library gives real study time and respects closing", () => {
++  const s = P.planStudy({ from: "UT", to: "ET", freeMin: 30, now: W });
++  assert.equal(s.options[0].id, "S_UL");
++  assert.ok(s.options[0].studyMin >= 10);
++  const late = P.planStudy({ from: "SL", freeMin: 60, now: { day: 5, hour: "5:50pm" } }); // library closes 6 PM Friday
++  assert.ok(!late.options.some(o => o.id === "S_UL"));
++});
++
++test("panic: 8 min NH -> SL, hungry: straight to class, snack only if you accept lateness", () => {
++  const p = P.panicPlan({ from: "NH", to: "SL", freeMin: 8, now: W });
++  assert.equal(p.pick.kind, "direct");
++  assert.ok(p.options.some(o => o.kind === "vending"));
++  assert.ok(p.options.every(o => o.delta === 8 - o.minutes && o.makesIt === (o.delta >= 0)));
++});
++
++test("rush: impossible trip reports how late", () => {
++  const r = P.rushRoute({ from: "CE", to: "IO", minutesLeft: 4, now: W });
++  assert.equal(r.verdict, "late");
++  assert.ok(r.lateByMin > 0);
++});
++
++test("GPS snaps to the nearest building", () => {
++  assert.equal(P.whereAmI(39.7762, -86.1728).id, "NH");
++  assert.equal(P.resolvePlace({ lat: 39.7762, lng: -86.1728 }).building, "NH");
++});
++
++test("directory and status cover everything", () => {
++  const d = P.directory(W);
++  assert.ok(d.some(x => x.type === "study") && d.some(x => x.type === "coffee") && d.some(x => x.type === "academic"));
++  assert.equal(P.campusStatus(W).length, 4);
++});
+diff --git a/backend/test/survive.test.js b/backend/test/survive.test.js
+new file mode 100644
+index 0000000..472a0d9
+--- /dev/null
++++ b/backend/test/survive.test.js
+@@ -0,0 +1,91 @@
++import { test } from "node:test";
++import assert from "node:assert/strict";
++import { survive, NeedsInfoError } from "../src/survive.js";
++import { checkResponse } from "../src/contract.js";
++
++const W = { day: 3, hour: "12:15pm" };
++
++// Fake Gemini in its real generateContent response format.
++function fakeGemini(intentJson, narration = "Go to Tower Dining.") {
++  const calls = [];
++  const fetchImpl = async (url, init) => {
++    const body = JSON.parse(init.body);
++    calls.push({ url, headers: init.headers, body });
++    const isIntent = Boolean(body.generationConfig.responseSchema);
++    const text = isIntent ? JSON.stringify(intentJson) : narration;
++    return { ok: true, status: 200, json: async () => ({ candidates: [{ content: { role: "model", parts: [{ text }] }, finishReason: "STOP" }] }) };
++  };
++  return { fetchImpl, calls };
++}
++
++const FRONTEND_QUERIES = [
++  "I have 25 minutes between my classes and I'm hungry. I'm at University Hall and my next class is at Innovation Hall.",
++  "I have 25 minutes and I'm hungry.",
++  "I have 22 minutes to find coffee.",
++  "I have 30 minutes to study.",
++  "I have 30 minutes between classes in SL and I'm hungry.",
++  "I have 8 minutes to get from the library to SL.",
++  "I have 8 minutes, I'm in North Hall, class in SL, starving",
++  "help im screwed, 4 min to get from campus center to innovation hall",
++  "I have 30 minutes for food at Chick-fil-A.",
++  "can I get tower dining before my 12:45 class in ET? im in SL"
++];
++
++for (const q of FRONTEND_QUERIES) {
++  test(`contract holds (no AI): ${q.slice(0, 48)}`, async () => {
++    const r = await survive({ query: q, now: W, skipAI: true });
++    assert.deepEqual(checkResponse(r), []);
++    assert.ok(r.narration.length > 0);
++    assert.ok(r.campusStatus.length === 4 && r.origin.id && r.destination.id);
++  });
++}
++
++test("Gemini path: header key, schema intent, narration used, numbers untouched", async () => {
++  const g = fakeGemini({ origin: "SL", destination: "ET", minutesAvailable: 30, classTime: null, goal: "food", urgent: false, wants: [], avoids: [], usesCurrentLocation: false },
++    "Tower Dining fits: 7 min walk, 14 min meal, 4 min to ET, 5 min buffer.");
++  const r = await survive({ query: "30 min between SL and ET, hungry", now: W, apiKey: "k", fetchImpl: g.fetchImpl });
++  assert.equal(g.calls.length, 2);
++  assert.equal(g.calls[0].headers["x-goog-api-key"], "k");
++  assert.ok(!g.calls[0].url.includes("key="), "key must not be in the URL");
++  assert.equal(r.ai.intent, "gemini");
++  assert.equal(r.ai.narration, "gemini");
++  assert.equal(r.location, "Tower Dining");
++  assert.equal(r.totalMinutes, 25);
++  assert.deepEqual(checkResponse(r), []);
++});
++
++test("Gemini down (HTTP 500): falls back to rules + template, still a valid plan", async () => {
++  const fetchImpl = async () => ({ ok: false, status: 500, json: async () => ({ error: { message: "backend error" } }) });
++  const r = await survive({ query: "I have 30 min between CS 180 in SL and my next class in ET and I'm hungry", now: W, apiKey: "k", fetchImpl });
++  assert.equal(r.ai.intent, "rules");
++  assert.equal(r.ai.narration, "template");
++  assert.equal(r.location, "Tower Dining");
++  assert.ok(r.ai.errors.length === 2);
++});
++
++test("Gemini hallucinates a building: ignored, rules fill in", async () => {
++  const g = fakeGemini({ origin: "Hogwarts", destination: "ET", minutesAvailable: 30, goal: "food", urgent: false, wants: [], avoids: [], usesCurrentLocation: false });
++  const r = await survive({ query: "in SL, 30 min, next class ET, hungry", now: W, apiKey: "k", fetchImpl: g.fetchImpl });
++  assert.equal(r.origin.id, "SL");
++});
++
++test("panic mode fills the I'm Screwed panel", async () => {
++  const r = await survive({ query: "I have 8 minutes, I'm in North Hall, class in SL, starving", now: W, skipAI: true });
++  assert.equal(r.mode, "panic");
++  assert.ok(r.panic.options.length >= 3);
++  assert.equal(r.panic.options.filter(o => o.recommended).length, 1);
++  assert.ok(r.panic.yourMove.title.length > 0);
++});
++
++test("GPS location is used when no building is named", async () => {
++  const r = await survive({ query: "I have 25 minutes and I'm hungry", location: { lat: 39.7762, lng: -86.1728 }, now: W, skipAI: true });
++  assert.equal(r.origin.short, "North Hall");
++});
++
++test("missing destination for travel -> clear 422-style error", async () => {
++  await assert.rejects(survive({ query: "I have 10 minutes to get to class.", now: W, skipAI: true }), NeedsInfoError);
++});
++
++test("empty query -> NeedsInfoError", async () => {
++  await assert.rejects(survive({ query: "   ", now: W, skipAI: true }), NeedsInfoError);
++});
+diff --git a/engine.js b/engine.js
+deleted file mode 100644
+index 5e1c261..0000000
+--- a/engine.js
++++ /dev/null
+@@ -1,265 +0,0 @@
+-// ============================================================
+-// CAMPUS SURVIVAL ASSISTANT — backend / logic layer
+-// Gemini parses intent and narrates. All math happens here.
+-// ============================================================
+-
+-import { CAMPUS } from "./campus.js";
+-
+-// >>> SET THIS FIRST <<<
+-// Check aistudio.google.com for the current free-tier Flash model id.
+-// A wrong string returns a 404 that looks like an auth error.
+-const MODEL = "gemini-flash-latest";
+-const ENDPOINT = `https://generativelanguage.googleapis.com/v1beta/models/${MODEL}:generateContent`;
+-
+-const WALK_MS   = 1.4;   // avg walking speed, m/s
+-const HUSTLE_MS = 2.2;   // fast walk / light jog
+-const DETOUR    = 1.3;   // straight-line -> real path multiplier
+-const CORRIDOR  = 1.35;  // a stop is "on the way" if it costs < 35% extra
+-
+-// Anywhere you can obtain food: dining halls + vending machines.
+-const foodSpots = () => [...CAMPUS.dining, ...CAMPUS.vending];
+-const allPlaces = () => [...CAMPUS.buildings, ...CAMPUS.dining, ...CAMPUS.vending];
+-
+-// ============================================================
+-// GEOMETRY + TIME
+-// ============================================================
+-
+-function metersBetween(a, b) {
+-  const R = 6371000;
+-  const toRad = d => d * Math.PI / 180;
+-  const dLat = toRad(b.lat - a.lat);
+-  const dLng = toRad(b.lng - a.lng);
+-  const h = Math.sin(dLat / 2) ** 2 +
+-            Math.cos(toRad(a.lat)) * Math.cos(toRad(b.lat)) * Math.sin(dLng / 2) ** 2;
+-  return 2 * R * Math.asin(Math.sqrt(h));
+-}
+-
+-function walkMinutes(a, b, speed = WALK_MS) {
+-  return (metersBetween(a, b) * DETOUR) / speed / 60;
+-}
+-
+-function isOpen(spot, now = new Date()) {
+-  const window = spot.hours?.[now.getDay()];
+-  if (!window) return false;
+-  const hour = now.getHours() + now.getMinutes() / 60;
+-  return hour >= window[0] && hour < window[1];
+-}
+-
+-function minutesUntilClose(spot, now = new Date()) {
+-  const window = spot.hours?.[now.getDay()];
+-  if (!window) return 0;
+-  return (window[1] - (now.getHours() + now.getMinutes() / 60)) * 60;
+-}
+-
+-function findPlace(query) {
+-  const q = (query || "").toLowerCase().trim();
+-  if (!q) return null;
+-  return allPlaces().find(p =>
+-    p.id.toLowerCase() === q ||
+-    p.name.toLowerCase().includes(q) ||
+-    (p.aliases || []).some(a => a.toLowerCase() === q)
+-  ) || null;
+-}
+-
+-// ============================================================
+-// GEMINI CALL
+-// ============================================================
+-
+-async function callGemini(apiKey, prompt, asJson = false) {
+-  const body = {
+-    contents: [{ parts: [{ text: prompt }] }],
+-    generationConfig: asJson
+-      ? { responseMimeType: "application/json", temperature: 0.1 }
+-      : { temperature: 0.6 }
+-  };
+-
+-  const res = await fetch(`${ENDPOINT}?key=${apiKey}`, {
+-    method: "POST",
+-    headers: { "Content-Type": "application/json" },
+-    body: JSON.stringify(body)
+-  });
+-
+-  if (!res.ok) throw new Error(`Gemini ${res.status}: ${await res.text()}`);
+-  const data = await res.json();
+-  const text = data.candidates[0].content.parts[0].text;
+-  return asJson ? JSON.parse(text) : text;
+-}
+-
+-// ============================================================
+-// INTENT PARSER  (Gemini -> structured JSON)
+-// ============================================================
+-
+-function intentPrompt(query) {
+-  const places = allPlaces()
+-    .map(p => `${p.id} = ${p.name}${p.kind === "vending" ? " (vending machine)" : ""}`)
+-    .join("\n");
+-
+-  return `Extract structured intent from a campus navigation request.
+-
+-Known places:
+-${places}
+-
+-Request: "${query}"
+-
+-Return JSON only:
+-{
+-  "start": "place id or null",
+-  "end": "place id or null",
+-  "minutesAvailable": number or null,
+-  "goal": "food" | "travel" | "both",
+-  "mode": "normal" | "panic"
+-}
+-
+-Rules:
+-- Use exact place ids from the list above. If a place isn't listed, use null.
+-- mode is "panic" if the request implies urgency, lateness, or an
+-  impossible-sounding time budget. Otherwise "normal".
+-- Do not compute times or distances. Extract only what is stated.`;
+-}
+-
+-// ============================================================
+-// FEASIBILITY ENGINE  (pure JS — the real work)
+-// ============================================================
+-
+-function planFoodStop(intent, now = new Date()) {
+-  const start = findPlace(intent.start);
+-  const end   = findPlace(intent.end) || start;
+-  if (!start) return [];
+-
+-  const budget = intent.minutesAvailable ?? 30;
+-
+-  return foodSpots()
+-    .filter(spot => isOpen(spot, now))
+-    .map(spot => {
+-      const there = walkMinutes(start, spot);
+-      const back  = walkMinutes(spot, end);
+-      const eat   = spot.serviceMin;
+-      const total = there + eat + back;
+-      return {
+-        name: spot.name,
+-        kind: spot.kind,
+-        walkTo: Math.round(there),
+-        eat,
+-        walkOn: Math.round(back),
+-        total: Math.round(total),
+-        buffer: Math.round(budget - total),
+-        feasible: total <= budget && minutesUntilClose(spot, now) > there + 5,
+-        tags: spot.tags
+-      };
+-    })
+-    .sort((a, b) => b.buffer - a.buffer);
+-}
+-
+-function planPanic(intent, now = new Date()) {
+-  const start = findPlace(intent.start);
+-  const end   = findPlace(intent.end);
+-  if (!start || !end) return [];
+-
+-  const budget = intent.minutesAvailable ?? 8;
+-  const normal = walkMinutes(start, end);
+-  const hustle = walkMinutes(start, end, HUSTLE_MS);
+-  const direct = metersBetween(start, end);
+-
+-  const options = [
+-    {
+-      label: "Normal pace",
+-      kind: "route",
+-      minutes: Math.round(normal),
+-      delta: Math.round(budget - normal),
+-      note: "Walking how you'd normally walk."
+-    },
+-    {
+-      label: "Hustle",
+-      kind: "route",
+-      minutes: Math.round(hustle),
+-      delta: Math.round(budget - hustle),
+-      note: "Fast walk. You will arrive warm."
+-    }
+-  ];
+-
+-  // What can you grab without meaningfully costing you time?
+-  foodSpots()
+-    .filter(spot => isOpen(spot, now))
+-    .forEach(spot => {
+-      const viaDist = metersBetween(start, spot) + metersBetween(spot, end);
+-      if (viaDist > direct * CORRIDOR) return;
+-
+-      const grab = spot.kind === "vending" ? spot.serviceMin : 4;
+-      const via  = walkMinutes(start, spot, HUSTLE_MS)
+-                 + grab
+-                 + walkMinutes(spot, end, HUSTLE_MS);
+-
+-      options.push({
+-        label: spot.kind === "vending"
+-          ? `Hustle + vending at ${spot.name}`
+-          : `Hustle + grab from ${spot.name}`,
+-        kind: spot.kind,
+-        minutes: Math.round(via),
+-        delta: Math.round(budget - via),
+-        note: spot.kind === "vending"
+-          ? `On your path. ${grab}-minute stop.`
+-          : `Roughly on your path. Assumes a ${grab}-minute grab-and-go.`
+-      });
+-    });
+-
+-  return options
+-    .map(o => ({ ...o, makesIt: o.delta >= 0 }))
+-    .sort((a, b) => b.delta - a.delta);
+-}
+-
+-// ============================================================
+-// NARRATOR  (Gemini writes over computed numbers)
+-// ============================================================
+-
+-function narratorPrompt(query, intent, options) {
+-  return `You are a campus assistant. A student asked: "${query}"
+-
+-These options were computed from real distances and opening hours.
+-The numbers are correct — never recalculate or change them.
+-
+-${JSON.stringify(options, null, 2)}
+-
+-Write a short recommendation:
+-- Lead with the single best option and why.
+-- Give its time breakdown using the exact numbers above.
+-- Mention one runner-up and the tradeoff.
+-${intent.mode === "panic"
+-  ? "- This is urgent. If nothing makes it in time, say so directly and give the least-late option."
+-  : "- Note the leftover buffer so they know how much slack they have."}
+-
+-If a vending machine is the only option that fits the time budget, recommend it
+-plainly. It is a real answer, not a consolation prize. Do not apologize for it.
+-
+-Be concise and direct. No preamble, no lists longer than three items.
+-Do not invent places, times, or menu items.`;
+-}
+-
+-// ============================================================
+-// ORCHESTRATOR — the one function the UI calls
+-// ============================================================
+-
+-async function ask(query, apiKey) {
+-  const intent = await callGemini(apiKey, intentPrompt(query), true);
+-
+-  const options = intent.mode === "panic"
+-    ? planPanic(intent)
+-    : planFoodStop(intent);
+-
+-  if (!options.length) {
+-    return {
+-      intent,
+-      options: [],
+-      answer: "I couldn't match that to places I know on campus. Try naming the building directly."
+-    };
+-  }
+-
+-  const answer = await callGemini(
+-    apiKey,
+-    narratorPrompt(query, intent, options.slice(0, 4)),
+-    false
+-  );
+-
+-  return { intent, options, answer };
+-}
+-
+-export { ask, planPanic, planFoodStop, findPlace, walkMinutes, CAMPUS };
