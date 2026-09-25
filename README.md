@@ -1,50 +1,42 @@
-# Campus Survival Assistant
+# Campus Survival
 
-Ask in plain English, get a plan that actually fits the time you have.
+Campus Survival helps students decide whether they have time for food, coffee, studying, or a direct walk before their next class. This repository is a hackathon work in progress with an interactive **frontend demo** and a separate **planning engine** that has not yet been connected to the frontend. The interface uses Purdue University in Indianapolis locations and a black-and-gold theme; it is not an official university app.
 
-> "I have 30 minutes between classes in SL and I'm hungry."
->
-> "I have 8 minutes to get from the library to SL."
+## Try the frontend
 
-## What it does
+A [private demo site](https://campus-survival.well-harp-0365.chatgpt.site) is available to its authorized viewers. To run the version committed in this repository locally, install Node.js and npm, then:
 
-Google Maps can tell you how far away something is. It can't tell you whether
-you have time for it. The gap between two classes isn't a routing problem —
-it's a constraint problem, and the constraints are walking time, service time,
-opening hours, and how late you're willing to be.
+```sh
+cd frontend
+npm ci
+npm run dev
+```
 
-This app solves that. You describe your situation in a sentence, and it returns
-a ranked set of options with the full time breakdown: how long to walk there,
-how long you'll wait for food, how long to get to your next class, and how much
-buffer you're left with.
+Open the address printed by Vite (port 4173 by default). Run `npm run build` from `frontend/` to type-check and create production assets in `frontend/dist/`. There is no root `package.json`; run npm commands inside `frontend/`.
 
-## Panic mode
+For the main demo, click **Try Demo**, then **SURVIVE**. The sample plans a stop at Campus Café between University Hall and Innovation Hall: 5 minutes to the café, 10 minutes for food, and 6 minutes to class, for a **21-minute trip** and **4-minute buffer** within the example's 25-minute window. The **I'm Screwed** control shows an 8-minute scenario comparing two food detours with a 6-minute direct walk. You can also open route steps and reasoning, choose an alternative, use quick actions, and browse the Campus and Places views.
 
-When the time budget is impossible, the app doesn't give up — it returns
-tradeoffs. What makes it, what doesn't, how late each option lands, and what
-accepting two extra minutes actually buys you.
+**The displayed results are simulated.** The venue hours, campus status, walking times, and route drawing in the frontend are mock values. The diagram is illustrative and should not be used for navigation. The frontend does not call Gemini, use GPS, or fetch live dining information.
 
-It also knows where the **vending machines** are, which Google Maps doesn't.
-When you have eight minutes, a vending machine on your route is often the right
-answer, and the app says so plainly.
+## Repository layout
 
-## How it works
+| Path | Current role |
+| --- | --- |
+| `frontend/` | React, Vite, TypeScript, Tailwind CSS, and Lucide React application. Runs independently with mock recommendations. |
+| `frontend/src/data/mockCampus.ts` | Mock location catalog and `getSurvivalRecommendation(query)` function; the intended API integration boundary. |
+| `frontend/src/types/campus.ts` | Frontend route and recommendation types. |
+| `frontend/docs/BACKEND_INTEGRATION.md` | Detailed interface contract and integration notes for the engine. |
+| `frontend/docs/VALIDATION.md` | Completed checks, manual acceptance checklist, and limitations. |
+| `engine.js` | Separate JavaScript module for Gemini intent extraction and narration, plus deterministic distance and feasibility calculations. |
 
-Three stages:
+## Engine status
 
-1. **Intent parsing** — Gemini turns a messy sentence into structured data:
-   where you are, where you're going, how many minutes you have, and whether
-   this is urgent.
-2. **Feasibility math** — plain JavaScript computes every distance, walking
-   time, and opening-hours check against verified campus coordinates. The
-   language model never touches arithmetic, so the numbers can't drift.
-3. **Narration** — Gemini writes the recommendation over the computed results,
-   under instruction never to recalculate or invent anything.
+`engine.js` exports `ask(query, apiKey)`, `planFoodStop`, `planPanic`, `findPlace`, and `walkMinutes`. Its intended flow is to extract structured intent with Gemini, calculate options in JavaScript from a campus dataset, and use Gemini to narrate the result. It has **not been integrated into the running frontend**.
 
-Every number the app shows you was computed, not generated.
+The engine currently imports `./campus.js`, but **`campus.js` is not in this repository**. Consequently the engine cannot be imported and run as committed. There is also no server endpoint for calling it, no documented server setup, and no automated engine tests. The root README previously described manually verified coordinates and vending machine locations; those claims cannot be verified from the files currently committed.
 
-## Data
+Before connecting the parts, provide the campus dataset expected by `engine.js`, confirm the configured Gemini model and API access, create a server-owned endpoint, and map the engine's `{ intent, options, answer }` response to the frontend contract. Keep the Gemini key on the server; never expose it through browser code. Food options use `name`, `total`, `buffer`, `walkTo`, `eat`, `walkOn`, and `feasible`. Panic options use `label`, `minutes`, `delta`, and `makesIt`. See the [integration guide](frontend/docs/BACKEND_INTEGRATION.md) for the full handoff.
 
-Campus coordinates were collected and verified by hand, including dining
-locations with realistic service times and vending machines that aren't on any
-map. The dataset is static, so the app makes no location API calls at runtime.
+## Validation so far
+
+The frontend's TypeScript/Vite production build passed during development. Direct checks of the mock recommendation logic covered the 25-minute food example, 8-minute direct-class example, a tight coffee scenario, and an over-budget food scenario. These are development checks, not a committed automated test suite. Browser end-to-end, mobile, and optional WebMCP behavior have not been verified in a working preview environment; see [validation details](frontend/docs/VALIDATION.md).
