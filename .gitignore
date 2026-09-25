@@ -1,0 +1,17 @@
+# secrets — the Gemini key lives in backend/.env and never gets committed
+.env
+.env.local
+*.key
+
+# dependencies & build output
+node_modules/
+dist/
+build/
+.vite/
+*.tsbuildinfo
+
+# editor / os
+.DS_Store
+.vscode/
+.idea/
+*.log
