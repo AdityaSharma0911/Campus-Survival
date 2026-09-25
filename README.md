@@ -1,6 +1,6 @@
 # Campus Survival
 
-Campus Survival helps students decide whether they have time for food, coffee, studying, or a direct walk before their next class. This repository is a hackathon work in progress with an interactive **frontend demo** and a separate **planning engine** that has not yet been connected to the frontend. The interface uses Purdue University in Indianapolis locations and a black-and-gold theme; it is not an official university app.
+Campus Survival helps students decide whether they have time for food, coffee, studying, or a direct walk before their next class. This repository is a hackathon work in progress with an interactive **frontend demo** and a separate **planning engine** that has not yet been connected to the frontend. The interface uses Purdue University in Indianapolis locations and a black-and-gold theme.
 
 ## Try the frontend
 
