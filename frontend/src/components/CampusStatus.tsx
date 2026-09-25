@@ -1,0 +1,1 @@
+export default function CampusStatus(){return <section className="campus-status"><div><h2>Campus status</h2><span>DEMO SNAPSHOT</span></div>{[['Campus','Normal'],['Dining','Open'],['Walking','Busy'],['Study spaces','Available']].map(([k,v])=><div key={k}><span>{k}</span><strong><i className={'tiny-dot '+(v==='Busy'?'busy':'')}/>{v}</strong></div>)}</section>}

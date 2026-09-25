@@ -1,0 +1,2 @@
+import type {RiskLevel} from '../types/campus';
+export default function RiskIndicator({risk,buffer}:{risk:RiskLevel;buffer:number}){return <div className={'risk '+risk}><span className="status-pill"><span className="tiny-dot"/>{risk==='safe'?'SAFE':risk==='tight'?'CUTTING IT CLOSE':"I'M SCREWED"}</span><div><b>{Math.abs(buffer)}</b><span>MIN {buffer<0?'OVER':'BUFFER'}</span></div><p>{risk==='safe'?'A little room to breathe.':risk==='tight'?"Make it count. Don't waste time.":'Skip the detour. Head to class.'}</p></div>}
