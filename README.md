@@ -16,8 +16,6 @@ Open the address printed by Vite (port 4173 by default). Run `npm run build` fro
 
 For the main demo, click **Try Demo**, then **SURVIVE**. The sample plans a stop at Campus Café between University Hall and Innovation Hall: 5 minutes to the café, 10 minutes for food, and 6 minutes to class, for a **21-minute trip** and **4-minute buffer** within the example's 25-minute window. The **I'm Screwed** control shows an 8-minute scenario comparing two food detours with a 6-minute direct walk. You can also open route steps and reasoning, choose an alternative, use quick actions, and browse the Campus and Places views.
 
-**The displayed results are simulated.** The venue hours, campus status, walking times, and route drawing in the frontend are mock values. The diagram is illustrative and should not be used for navigation. The frontend does not call Gemini, use GPS, or fetch live dining information.
-
 ## Repository layout
 
 | Path | Current role |
